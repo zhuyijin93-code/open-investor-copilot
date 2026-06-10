@@ -92,7 +92,7 @@ def help_text() -> str:
 
         提醒:
         - `样本池` 是仓库自带的小样本
-        - `A股` 会尝试拉取更大的免费行情股票池
+        - `A股` 默认拉取全量免费行情股票池
         - 这不是投资建议
         """
     ).strip()
@@ -129,8 +129,8 @@ def resolve_universe_path(market: str | None = None) -> Path:
                 candidate = PROJECT_ROOT / configured_a.strip()
         else:
             candidate = PROJECT_ROOT / ".cache" / "a_share_universe.csv"
-        limit = int(settings.get("a_share_limit", 800)) if isinstance(settings, dict) else 800
-        min_amount_yuan = float(settings.get("a_share_min_amount_yuan", 30_000_000)) if isinstance(settings, dict) else 30_000_000.0
+        limit = int(settings.get("a_share_limit", 0)) if isinstance(settings, dict) else 0
+        min_amount_yuan = float(settings.get("a_share_min_amount_yuan", 0)) if isinstance(settings, dict) else 0.0
         max_age_seconds = int(settings.get("a_share_cache_seconds", 900)) if isinstance(settings, dict) else 900
         return data_sources.refresh_a_share_universe(
             candidate,
@@ -279,8 +279,8 @@ def handle_message(message: str) -> BotReply:
             hint = "\n\n可用策略: 质量 / 动量 / 价值 / 低波"
         elif "Ticker" in str(exc):
             hint = "\n\n提示: 先发送 `股票池` 或 `股票池 A股` 看当前股票池里有哪些代码。"
-        elif "urlopen error" in str(exc).lower() or "timed out" in str(exc).lower() or "eastmoney" in str(exc).lower():
-            hint = "\n\n提示: A股大股票池需要联网拉取免费行情快照。你也可以先试 `选股 质量 样本`。"
+        elif "urlopen error" in str(exc).lower() or "timed out" in str(exc).lower() or "eastmoney" in str(exc).lower() or "sina" in str(exc).lower():
+            hint = "\n\n提示: A股全量股票池需要联网拉取免费行情快照。你也可以先试 `选股 质量 样本`。"
         return BotReply(
             f"Request failed: {exc}{hint}\n\n试试 `帮助` 查看支持的命令。",
             "error",

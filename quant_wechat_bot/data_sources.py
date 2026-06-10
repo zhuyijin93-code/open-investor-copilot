@@ -123,7 +123,8 @@ def _fetch_eastmoney_rows(limit: int, min_amount_yuan: float) -> list[dict[str, 
     page_size = 100
     total = None
     page = 1
-    while len(rows) < limit:
+    target_limit = limit if limit and limit > 0 else None
+    while target_limit is None or len(rows) < target_limit:
         payload = _fetch_eastmoney_page(page, page_size)
         data = payload.get("data") or {}
         total = total or int(data.get("total") or 0)
@@ -145,7 +146,7 @@ def _fetch_eastmoney_rows(limit: int, min_amount_yuan: float) -> list[dict[str, 
             )
             if row:
                 rows.append(row)
-            if len(rows) >= limit:
+            if target_limit is not None and len(rows) >= target_limit:
                 break
         if total and page * page_size >= total:
             break
@@ -173,7 +174,8 @@ def _fetch_sina_rows(limit: int, min_amount_yuan: float) -> list[dict[str, str]]
     rows: list[dict[str, str]] = []
     page_size = 80
     page = 1
-    while len(rows) < limit:
+    target_limit = limit if limit and limit > 0 else None
+    while target_limit is None or len(rows) < target_limit:
         items = _fetch_sina_page(page, page_size)
         if not items:
             break
@@ -195,13 +197,13 @@ def _fetch_sina_rows(limit: int, min_amount_yuan: float) -> list[dict[str, str]]
             )
             if row:
                 rows.append(row)
-            if len(rows) >= limit:
+            if target_limit is not None and len(rows) >= target_limit:
                 break
         page += 1
     return rows
 
 
-def fetch_a_share_rows(limit: int = 800, min_amount_yuan: float = 30_000_000.0) -> list[dict[str, str]]:
+def fetch_a_share_rows(limit: int = 0, min_amount_yuan: float = 0.0) -> list[dict[str, str]]:
     """Fetch a free A-share snapshot and normalize it to the bot CSV schema.
 
     Eastmoney is tried first and Sina is used as a fallback. These free quote
@@ -224,8 +226,8 @@ def fetch_a_share_rows(limit: int = 800, min_amount_yuan: float = 30_000_000.0) 
 def refresh_a_share_universe(
     output_path: str | Path,
     *,
-    limit: int = 800,
-    min_amount_yuan: float = 30_000_000.0,
+    limit: int = 0,
+    min_amount_yuan: float = 0.0,
     max_age_seconds: int = 900,
 ) -> Path:
     output = Path(output_path)

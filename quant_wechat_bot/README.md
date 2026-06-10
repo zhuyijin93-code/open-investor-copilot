@@ -106,8 +106,9 @@ python3 -m quant_wechat_bot.bot_service chat "评分 600519 A股"
 
 How it works:
 
-- uses a free Eastmoney market snapshot
-- filters out ST / delisted-like names / low-turnover names
+- uses free Eastmoney first, with Sina market data as fallback
+- default `a_share_limit: 0` means fetch all available A-share rows from the source
+- filters out ST / delisted-like names; no turnover filter by default
 - caches the local CSV under `quant_wechat_bot/.cache/a_share_universe.csv`
 - default example config now points normal `选股 ...` commands to `A股`
 
@@ -161,7 +162,7 @@ Example config:
   "default_market": "A股",
   "default_strategy": "quality",
   "a_share_universe_csv": ".cache/a_share_universe.csv",
-  "a_share_limit": 800,
+  "a_share_limit": 0,
   "wechat_official_token": "replace-with-your-token",
   "wechat_menu_actions": {
     "MENU_PICK_QUALITY": "选股 质量 A股",

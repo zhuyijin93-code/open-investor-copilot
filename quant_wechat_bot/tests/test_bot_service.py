@@ -109,10 +109,13 @@ class BotServiceTests(unittest.TestCase):
         self.assertIn("Quant WeChat Bot", reply_xml)
 
     def test_wechat_click_event_uses_default_menu_mapping(self) -> None:
-        with mock.patch(
-            "quant_wechat_bot.bot_service.handle_message",
-            return_value=bot_service.BotReply("menu result", "pick"),
-        ) as handle:
+        with (
+            mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
+            mock.patch(
+                "quant_wechat_bot.bot_service.handle_message",
+                return_value=bot_service.BotReply("menu result", "pick"),
+            ) as handle,
+        ):
             reply_xml = bot_service.build_wechat_reply(
                 """
                 <xml>

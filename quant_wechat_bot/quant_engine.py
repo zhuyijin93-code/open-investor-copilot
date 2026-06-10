@@ -240,7 +240,7 @@ def format_screen_output(path: str | Path, strategy_value: str | None, top_n: in
     lines.append("")
     example = "评分 600519 A股" if market_label(market) == "A股" else "评分 NVDA"
     if market_label(market) == "A股":
-        lines.append("注: 免费 A股源当前使用东方财富快照，基本面因子待接入更完整财报源。")
+        lines.append("注: 免费 A股源当前使用东方财富/新浪行情快照，基本面因子待接入更完整财报源。")
     lines.append(f"发送 `{example}` 查看单票多策略评分。")
     return "\n".join(lines)
 
@@ -317,7 +317,7 @@ def format_universe_overview(path: str | Path, market: str | None = None) -> str
         lines.append(f"- {sector}: {count}")
     lines.append("")
     if market_label(market) == "A股":
-        lines.append("数据源: 东方财富免费行情快照；已过滤 ST/退市/低成交额股票。")
+        lines.append("数据源: 东方财富/新浪免费行情快照；默认仅过滤 ST/退市类股票。")
     else:
         lines.append("你可以把 `sample_universe.csv` 替换成自己的日频因子导出文件。")
     return "\n".join(lines)

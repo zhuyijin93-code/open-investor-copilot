@@ -3,8 +3,8 @@
   "default_market": "A股",
   "default_strategy": "quality",
   "a_share_universe_csv": ".cache/a_share_universe.csv",
-  "a_share_limit": 800,
-  "a_share_min_amount_yuan": 30000000,
+  "a_share_limit": 0,
+  "a_share_min_amount_yuan": 0,
   "a_share_cache_seconds": 900,
   "wechat_official_token": "replace-with-your-token",
   "wechat_menu_actions": {
