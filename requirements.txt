@@ -1,0 +1,7 @@
+# This project currently uses only Python's standard library.
+# No third-party packages are required for the core scripts.
+#
+# Optional external services and tools:
+# - Fiscal.ai API key for free market snapshots
+# - FinChat API key for research Q&A
+# - lark-cli for Lark message delivery

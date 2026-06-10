@@ -1,0 +1,16 @@
+{
+  "finchat_api_key": "replace-with-your-finchat-api-key",
+  "fiscal_api_key": "replace-with-your-free-fiscal-api-key",
+  "market_brief_markets": ["US", "HK", "CN"],
+  "watchlist": ["NVDA", "TSLA", "0700.HK"],
+  "fiscal_watchlist": ["MSFT", "NVDA", "AMZN", "GOOG", "TSLA"],
+  "wechat_official_token": "replace-with-your-wechat-official-account-token",
+  "wechat_menu_actions": {
+    "MENU_HELP": "帮助",
+    "MENU_MARKET": "市场简报",
+    "MENU_FILINGS": "全部披露",
+    "MENU_BUFFETT": "巴菲特最新披露",
+    "MENU_WATCHLIST": "自选股快照"
+  },
+  "lark_group_webhook": "https://example.com/your-webhook"
+}

@@ -1,0 +1,44 @@
+{
+  "button": [
+    {
+      "name": "开始",
+      "sub_button": [
+        {
+          "type": "click",
+          "name": "帮助",
+          "key": "MENU_HELP"
+        },
+        {
+          "type": "click",
+          "name": "市场简报",
+          "key": "MENU_MARKET"
+        }
+      ]
+    },
+    {
+      "name": "披露",
+      "sub_button": [
+        {
+          "type": "click",
+          "name": "全部披露",
+          "key": "MENU_FILINGS"
+        },
+        {
+          "type": "click",
+          "name": "巴菲特",
+          "key": "MENU_BUFFETT"
+        }
+      ]
+    },
+    {
+      "name": "自选",
+      "sub_button": [
+        {
+          "type": "click",
+          "name": "自选股快照",
+          "key": "MENU_WATCHLIST"
+        }
+      ]
+    }
+  ]
+}
