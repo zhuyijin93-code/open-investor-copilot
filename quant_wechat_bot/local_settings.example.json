@@ -1,0 +1,17 @@
+{
+  "universe_csv": "sample_universe.csv",
+  "default_market": "A股",
+  "default_strategy": "quality",
+  "a_share_universe_csv": ".cache/a_share_universe.csv",
+  "a_share_limit": 800,
+  "a_share_min_amount_yuan": 30000000,
+  "a_share_cache_seconds": 900,
+  "wechat_official_token": "replace-with-your-token",
+  "wechat_menu_actions": {
+    "MENU_HELP": "帮助",
+    "MENU_PICK_QUALITY": "选股 质量 A股",
+    "MENU_PICK_MOMENTUM": "选股 动量",
+    "MENU_PICK_VALUE": "选股 价值",
+    "MENU_SCORE_NVDA": "评分 NVDA 样本"
+  }
+}

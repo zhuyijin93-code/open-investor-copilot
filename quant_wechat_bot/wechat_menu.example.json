@@ -1,0 +1,26 @@
+{
+  "button": [
+    {
+      "name": "开始",
+      "sub_button": [
+        { "type": "click", "name": "帮助", "key": "MENU_HELP" },
+        { "type": "click", "name": "策略列表", "key": "CMD:策略列表" }
+      ]
+    },
+    {
+      "name": "选股",
+      "sub_button": [
+        { "type": "click", "name": "A股质量", "key": "MENU_PICK_QUALITY" },
+        { "type": "click", "name": "A股动量", "key": "CMD:选股 动量 A股" },
+        { "type": "click", "name": "A股价值", "key": "CMD:选股 价值 A股" }
+      ]
+    },
+    {
+      "name": "评分",
+      "sub_button": [
+        { "type": "click", "name": "贵州茅台", "key": "CMD:评分 600519 A股" },
+        { "type": "click", "name": "宁德时代", "key": "CMD:评分 300750 A股" }
+      ]
+    }
+  ]
+}

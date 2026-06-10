@@ -1,0 +1,13 @@
+ticker,name,sector,price,market_cap_b,pe,pb,roe,revenue_growth,momentum_20d,momentum_60d,volatility_20d,dividend_yield
+MSFT,Microsoft,Software,425.1,3150,35.2,11.8,36.2,15.1,8.4,12.7,18.2,0.72
+NVDA,NVIDIA,Semiconductor,118.4,2900,62.5,48.2,91.0,86.4,21.5,44.1,38.0,0.03
+AAPL,Apple,Consumer Tech,198.7,3010,30.6,44.0,147.0,4.5,5.3,7.9,16.4,0.49
+AMZN,Amazon,E-commerce,184.2,1920,44.8,8.3,24.1,11.7,6.8,10.1,23.7,0.00
+META,Meta Platforms,Internet,501.4,1280,29.1,8.7,34.5,22.6,11.9,18.4,24.4,0.39
+GOOG,Alphabet,Internet,176.5,2190,27.4,6.8,28.7,13.3,7.2,9.5,20.1,0.43
+AVGO,Broadcom,Semiconductor,1710.0,795,31.9,14.7,32.8,24.1,12.4,19.8,27.8,1.82
+LLY,Eli Lilly,Pharma,812.4,770,69.3,52.4,61.2,32.9,9.1,17.5,22.0,0.63
+COST,Costco,Consumer Staples,851.7,378,55.1,16.9,29.6,8.7,4.1,6.0,14.8,0.52
+JPM,JPMorgan,Financials,202.6,588,12.8,2.1,17.9,8.1,3.2,6.8,17.6,2.31
+XOM,Exxon Mobil,Energy,115.3,455,14.6,2.3,18.6,2.4,-1.4,4.2,19.7,3.48
+WMT,Walmart,Retail,68.1,548,31.5,6.1,18.1,5.8,2.7,5.2,12.6,1.28
