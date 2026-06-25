@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: quant-wechat-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    healthCheckPath: /
+    envVars:
+      - key: WECHAT_OFFICIAL_TOKEN
+        sync: false
