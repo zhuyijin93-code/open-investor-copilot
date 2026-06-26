@@ -38,11 +38,13 @@ class MacroOpportunityTests(unittest.TestCase):
         specs = (
             macro_opportunity.MacroAssetSpec("CN1", "创业板", "A股成长", "CN", "risk"),
             macro_opportunity.MacroAssetSpec("US1", "纳指100", "美股科技", "US", "risk"),
+            macro_opportunity.MacroAssetSpec("DXY", "美元指数", "美元流动性", "GLOBAL", "macro", "dollar"),
         )
         with mock.patch("quant_wechat_bot.macro_opportunity.MACRO_ASSET_SPECS", specs):
             assets = macro_opportunity.selected_macro_assets("A股")
-        self.assertEqual(len(assets), 1)
+        self.assertEqual(len(assets), 2)
         self.assertEqual(assets[0].market_code, "CN")
+        self.assertEqual(assets[1].market_code, "GLOBAL")
 
     def test_build_macro_opportunities_skips_failed_symbols(self) -> None:
         specs = (
@@ -63,6 +65,29 @@ class MacroOpportunityTests(unittest.TestCase):
         self.assertEqual(len(opportunities), 1)
         self.assertEqual(opportunities[0].spec.label, "创业板")
         self.assertEqual(len(failures), 1)
+
+    def test_format_macro_scan_includes_dollar_yield_and_vix_signals(self) -> None:
+        specs = (
+            macro_opportunity.MacroAssetSpec("SPY", "标普500", "美股宽基", "US", "risk", "risk"),
+            macro_opportunity.MacroAssetSpec("DXY", "美元指数", "美元流动性", "GLOBAL", "macro", "dollar"),
+            macro_opportunity.MacroAssetSpec("TNX", "10Y美债利率", "全球利率", "GLOBAL", "macro", "yield"),
+            macro_opportunity.MacroAssetSpec("VIX", "VIX波动率", "风险情绪", "GLOBAL", "macro", "volatility"),
+        )
+        histories = {
+            "SPY": build_series(500.0, 1.0),
+            "DXY": build_series(100.0, -0.5),
+            "TNX": build_series(4.8, -0.03),
+            "VIX": build_series(20.0, -0.2),
+        }
+        with mock.patch("quant_wechat_bot.macro_opportunity.MACRO_ASSET_SPECS", specs):
+            text = macro_opportunity.format_macro_scan("全市场", history_fetcher=histories.__getitem__)
+        self.assertIn("关键宏观变量", text)
+        self.assertIn("美元指数", text)
+        self.assertIn("10Y美债利率", text)
+        self.assertIn("VIX波动率", text)
+        self.assertIn("流动性顺风", text)
+        self.assertIn("利率回落", text)
+        self.assertIn("波动降温", text)
 
 
 if __name__ == "__main__":

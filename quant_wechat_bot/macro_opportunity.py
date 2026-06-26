@@ -21,6 +21,7 @@ class MacroAssetSpec:
     theme: str
     market_code: str
     risk_bucket: str
+    signal_kind: str = "risk"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -39,18 +40,21 @@ class MacroOpportunity:
 
 
 MACRO_ASSET_SPECS: tuple[MacroAssetSpec, ...] = (
-    MacroAssetSpec("000300.SS", "沪深300", "A股宽基", "CN", "risk"),
-    MacroAssetSpec("399006.SZ", "创业板", "A股成长", "CN", "risk"),
-    MacroAssetSpec("^HSI", "恒指", "港股宽基", "HK", "risk"),
-    MacroAssetSpec("3033.HK", "恒科ETF", "港股科技", "HK", "risk"),
-    MacroAssetSpec("SPY", "标普500", "美股宽基", "US", "risk"),
-    MacroAssetSpec("QQQ", "纳指100", "美股科技", "US", "risk"),
-    MacroAssetSpec("IWM", "罗素2000", "美股小盘", "US", "risk"),
-    MacroAssetSpec("XLF", "金融ETF", "金融风格", "US", "risk"),
-    MacroAssetSpec("XLE", "能源ETF", "能源风格", "US", "risk"),
-    MacroAssetSpec("GLD", "黄金ETF", "黄金避险", "US", "defensive"),
-    MacroAssetSpec("TLT", "长债ETF", "长债避险", "US", "defensive"),
-    MacroAssetSpec("USO", "原油ETF", "原油通胀", "US", "cyclical"),
+    MacroAssetSpec("000300.SS", "沪深300", "A股宽基", "CN", "risk", "risk"),
+    MacroAssetSpec("399006.SZ", "创业板", "A股成长", "CN", "risk", "risk"),
+    MacroAssetSpec("^HSI", "恒指", "港股宽基", "HK", "risk", "risk"),
+    MacroAssetSpec("3033.HK", "恒科ETF", "港股科技", "HK", "risk", "risk"),
+    MacroAssetSpec("SPY", "标普500", "美股宽基", "US", "risk", "risk"),
+    MacroAssetSpec("QQQ", "纳指100", "美股科技", "US", "risk", "risk"),
+    MacroAssetSpec("IWM", "罗素2000", "美股小盘", "US", "risk", "risk"),
+    MacroAssetSpec("XLF", "金融ETF", "金融风格", "US", "risk", "risk"),
+    MacroAssetSpec("XLE", "能源ETF", "能源风格", "US", "risk", "risk"),
+    MacroAssetSpec("GLD", "黄金ETF", "黄金避险", "US", "defensive", "defensive"),
+    MacroAssetSpec("TLT", "长债ETF", "长债避险", "US", "defensive", "defensive"),
+    MacroAssetSpec("USO", "原油ETF", "原油通胀", "US", "cyclical", "cyclical"),
+    MacroAssetSpec("DX-Y.NYB", "美元指数", "美元流动性", "GLOBAL", "macro", "dollar"),
+    MacroAssetSpec("^TNX", "10Y美债利率", "全球利率", "GLOBAL", "macro", "yield"),
+    MacroAssetSpec("^VIX", "VIX波动率", "风险情绪", "GLOBAL", "macro", "volatility"),
 )
 
 
@@ -68,12 +72,12 @@ def selected_macro_assets(market: str | None = None) -> tuple[MacroAssetSpec, ..
     if label == "全市场":
         return MACRO_ASSET_SPECS
     code = market_close_digest.normalize_market(label).code
-    return tuple(item for item in MACRO_ASSET_SPECS if item.market_code == code)
+    return tuple(item for item in MACRO_ASSET_SPECS if item.market_code in {code, "GLOBAL"})
 
 
 def macro_signal_note(spec: MacroAssetSpec, *, close: float, ma20: float, ret5: float, ret20: float) -> tuple[str, str]:
     above_ma = close > ma20
-    if spec.risk_bucket == "risk":
+    if spec.signal_kind == "risk":
         if above_ma and ret20 >= 8 and ret5 >= 1:
             return "顺势做多", f"{spec.theme}继续领跑，适合优先看同方向最强个股。"
         if above_ma and ret20 >= 2:
@@ -81,17 +85,47 @@ def macro_signal_note(spec: MacroAssetSpec, *, close: float, ma20: float, ret5: 
         if not above_ma and ret20 <= -4:
             return "降权回避", f"{spec.theme}处于弱势区，先别急着逆势抄底。"
         return "中性观察", f"{spec.theme}暂时没有形成清晰趋势，保持观察。"
-    if spec.risk_bucket == "defensive":
+    if spec.signal_kind == "defensive":
         if above_ma and ret20 >= 3:
             return "对冲关注", f"{spec.theme}抬头，适合作为组合防守或风险对冲观察。"
         if above_ma:
             return "防守观察", f"{spec.theme}略偏强，适合在风险资产走弱时做备选。"
         return "防守降温", f"{spec.theme}自身也不强，说明防守需求暂未明显升温。"
+    if spec.signal_kind == "cyclical":
+        if above_ma and ret20 >= 5:
+            return "景气跟踪", f"{spec.theme}走强，说明通胀/周期交易有升温迹象。"
+        if not above_ma and ret20 <= -4:
+            return "景气降温", f"{spec.theme}回落，周期交易热度在降温。"
+        return "中性观察", f"{spec.theme}仍在震荡，先结合其他市场信号确认。"
+    if spec.signal_kind == "dollar":
+        if above_ma and ret20 >= 2:
+            return "流动性逆风", "美元偏强往往会压制全球风险偏好，仓位宜更保守。"
+        if not above_ma and ret20 <= -2:
+            return "流动性顺风", "美元回落有利于风险偏好修复，更适合看成长和弹性资产。"
+        return "美元震荡", "美元方向感不强，暂时不单独放大其影响。"
+    if spec.signal_kind == "yield":
+        if above_ma and ret20 >= 2:
+            return "利率抬升", "美债利率上行会抬高贴现率，对长久期成长资产偏不友好。"
+        if not above_ma and ret20 <= -2:
+            return "利率回落", "美债利率回落会缓解估值压力，更有利于成长和科技风格。"
+        return "利率震荡", "利率暂时横盘，对风格切换的指向性有限。"
+    if spec.signal_kind == "volatility":
+        if above_ma and ret20 >= 5:
+            return "波动升温", "VIX 抬升意味着避险需求升温，先控制仓位和节奏。"
+        if not above_ma and ret20 <= -5:
+            return "波动降温", "VIX 走弱说明恐慌回落，风险资产的容错率在提升。"
+        return "波动中性", "VIX 暂时没有形成单边信号，情绪面偏中性。"
     if above_ma and ret20 >= 5:
         return "景气跟踪", f"{spec.theme}走强，说明通胀/周期交易有升温迹象。"
     if not above_ma and ret20 <= -4:
         return "景气降温", f"{spec.theme}回落，周期交易热度在降温。"
     return "中性观察", f"{spec.theme}仍在震荡，先结合其他市场信号确认。"
+
+
+def signal_score_multiplier(spec: MacroAssetSpec) -> float:
+    if spec.signal_kind in {"dollar", "yield", "volatility"}:
+        return -1.0
+    return 1.0
 
 
 def evaluate_macro_asset(spec: MacroAssetSpec, history: list[tuple[dt.date, float]]) -> MacroOpportunity | None:
@@ -106,7 +140,11 @@ def evaluate_macro_asset(spec: MacroAssetSpec, history: list[tuple[dt.date, floa
     ret20 = trend_strategy.trailing_return(closes, 20)
     day_change = 0.0 if previous_close == 0 else (close / previous_close - 1.0) * 100.0
     pct_from_ma20 = 0.0 if ma20 == 0 else (close / ma20 - 1.0) * 100.0
-    score = ret20 * 0.7 + ret5 * 0.5 + pct_from_ma20 * 0.8 + (2.0 if close > ma20 else -2.0)
+    multiplier = signal_score_multiplier(spec)
+    score = (
+        (ret20 * 0.7 + ret5 * 0.5 + pct_from_ma20 * 0.8) * multiplier
+        + (2.0 if close > ma20 else -2.0) * multiplier
+    )
     setup, note = macro_signal_note(spec, close=close, ma20=ma20, ret5=ret5, ret20=ret20)
     return MacroOpportunity(
         spec=spec,
@@ -163,6 +201,8 @@ def market_leaders(opportunities: tuple[MacroOpportunity, ...]) -> tuple[MacroOp
     leaders: list[MacroOpportunity] = []
     seen: set[str] = set()
     for item in opportunities:
+        if item.spec.market_code == "GLOBAL":
+            continue
         code = item.spec.market_code
         if code in seen:
             continue
@@ -175,6 +215,7 @@ def preferred_opportunities(opportunities: tuple[MacroOpportunity, ...]) -> tupl
     candidates = [
         item
         for item in opportunities
+        if item.spec.signal_kind not in {"dollar", "yield", "volatility"}
         if item.setup in {"顺势做多", "趋势观察", "对冲关注", "景气跟踪"}
     ]
     return tuple(candidates[:4])
@@ -182,8 +223,32 @@ def preferred_opportunities(opportunities: tuple[MacroOpportunity, ...]) -> tupl
 
 def weak_links(opportunities: tuple[MacroOpportunity, ...]) -> tuple[MacroOpportunity, ...]:
     ordered = sorted(opportunities, key=lambda item: (item.score, item.spec.label))
-    selected = [item for item in ordered if item.setup in {"降权回避", "景气降温", "防守降温"}]
+    selected = [
+        item
+        for item in ordered
+        if item.spec.signal_kind not in {"dollar", "yield", "volatility"}
+        if item.setup in {"降权回避", "景气降温", "防守降温"}
+    ]
     return tuple(selected[:3])
+
+
+def macro_variable_signals(opportunities: tuple[MacroOpportunity, ...]) -> tuple[MacroOpportunity, ...]:
+    selected = [
+        item
+        for item in opportunities
+        if item.spec.signal_kind in {"dollar", "yield", "volatility"}
+    ]
+    return tuple(sorted(selected, key=lambda item: item.spec.label))
+
+
+def macro_wind_summary(opportunities: tuple[MacroOpportunity, ...]) -> str | None:
+    variables = macro_variable_signals(opportunities)
+    if not variables:
+        return None
+    labels = []
+    for item in variables:
+        labels.append(f"{item.spec.label} {item.setup}")
+    return " | ".join(labels)
 
 
 def format_macro_scan(
@@ -200,17 +265,28 @@ def format_macro_scan(
     leaders = market_leaders(opportunities)
     preferred = preferred_opportunities(opportunities)
     weak = weak_links(opportunities)
+    macro_variables = macro_variable_signals(opportunities)
     lines = [
         f"【宏观机会扫描｜{session_date.isoformat()}】",
         f"观察范围: {label}",
         f"风险偏好: {posture} | 风险资产 {risk_on}/{risk_total} 站上 MA20",
     ]
+    wind_summary = macro_wind_summary(opportunities)
+    if wind_summary:
+        lines.append(f"关键变量: {wind_summary}")
     if leaders:
         lines.extend(["", "跨市场强弱"])
         for item in leaders:
             lines.append(
                 f"- {item.spec.market_code}: {item.spec.label} | 日内 {item.day_change:+.2f}% | 5D {item.ret5:+.1f}% | 20D {item.ret20:+.1f}% | 偏离 MA20 {item.pct_from_ma20:+.1f}%"
             )
+    if macro_variables:
+        lines.extend(["", "关键宏观变量"])
+        for item in macro_variables:
+            lines.append(
+                f"- {item.spec.label} | 日内 {item.day_change:+.2f}% | 5D {item.ret5:+.1f}% | 20D {item.ret20:+.1f}% | 偏离 MA20 {item.pct_from_ma20:+.1f}% | {item.setup}"
+            )
+            lines.append(f"  {item.note}")
     if preferred:
         lines.extend(["", "可关注机会"])
         for index, item in enumerate(preferred, start=1):
