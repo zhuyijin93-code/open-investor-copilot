@@ -184,7 +184,7 @@ def resolve_universe_path(market: str | None = None) -> Path:
             max_age_seconds=max_age_seconds,
         )
     if normalized_market == "hk":
-        candidate = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.csv")
+        candidate = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.v2.csv")
         limit = int(settings.get("hk_share_limit", 0)) if isinstance(settings, dict) else 0
         min_amount_hkd = float(settings.get("hk_share_min_amount_hkd", 0)) if isinstance(settings, dict) else 0.0
         max_age_seconds = int(settings.get("hk_share_cache_seconds", 1800)) if isinstance(settings, dict) else 1800
@@ -195,7 +195,7 @@ def resolve_universe_path(market: str | None = None) -> Path:
             max_age_seconds=max_age_seconds,
         )
     if normalized_market == "us":
-        candidate = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.csv")
+        candidate = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.v2.csv")
         limit = int(settings.get("us_share_limit", 0)) if isinstance(settings, dict) else 0
         min_amount_usd = float(settings.get("us_share_min_amount_usd", 0)) if isinstance(settings, dict) else 0.0
         max_age_seconds = int(settings.get("us_share_cache_seconds", 1800)) if isinstance(settings, dict) else 1800
@@ -206,10 +206,10 @@ def resolve_universe_path(market: str | None = None) -> Path:
             max_age_seconds=max_age_seconds,
         )
     if normalized_market in {"all", "global"}:
-        candidate = resolve_configured_path(settings, "global_universe_csv", "global_universe.csv")
+        candidate = resolve_configured_path(settings, "global_universe_csv", "global_universe.v2.csv")
         a_share_path = resolve_configured_path(settings, "a_share_universe_csv", "a_share_universe.csv")
-        hk_share_path = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.csv")
-        us_share_path = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.csv")
+        hk_share_path = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.v2.csv")
+        us_share_path = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.v2.csv")
         return data_sources.refresh_global_universe(
             candidate,
             a_share_path=a_share_path,
