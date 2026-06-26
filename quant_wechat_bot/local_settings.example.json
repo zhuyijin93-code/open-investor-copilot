@@ -31,6 +31,11 @@
     "trailing_stop_pct": 0.15,
     "trend_break_window": 20
   },
+  "trend_execution": {
+    "entry_starter_fraction": 0.6,
+    "min_add_on_trigger_pct": 0.03,
+    "max_add_on_trigger_pct": 0.08
+  },
   "trend_precompute": {
     "enabled": true,
     "warm_on_startup": true,

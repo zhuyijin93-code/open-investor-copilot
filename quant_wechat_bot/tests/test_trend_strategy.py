@@ -169,6 +169,22 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(exit_rules.trailing_stop_pct, 0.10)
         self.assertEqual(exit_rules.trend_break_window, 10)
 
+    def test_execution_rules_can_be_overridden_from_settings(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.trend_strategy.market_close_digest.load_settings",
+            return_value={
+                "trend_execution": {
+                    "entry_starter_fraction": 0.5,
+                    "min_add_on_trigger_pct": 0.02,
+                    "max_add_on_trigger_pct": 0.06,
+                }
+            },
+        ):
+            execution_rules = trend_strategy.load_execution_rules()
+        self.assertAlmostEqual(execution_rules.entry_starter_fraction, 0.5)
+        self.assertAlmostEqual(execution_rules.min_add_on_trigger_pct, 0.02)
+        self.assertAlmostEqual(execution_rules.max_add_on_trigger_pct, 0.06)
+
     def test_build_trend_snapshot_enforces_sector_weight_cap(self) -> None:
         sector_path = Path(self.temp_dir.name) / "sector_cap.csv"
         write_universe_csv(
@@ -360,6 +376,56 @@ class TrendStrategyTests(unittest.TestCase):
         )
         self.assertEqual(plan[0].action, "卖出")
         self.assertEqual(plan[0].reason, "止损")
+
+    def test_build_execution_plan_splits_new_buy_into_two_steps(self) -> None:
+        current = (
+            trend_strategy.TrendPick(
+                "600519",
+                "600519.SS",
+                "Alpha",
+                "消费",
+                "A股",
+                100.0,
+                10.0,
+                0.25,
+                8.0,
+                20.0,
+                40.0,
+                10.0,
+                32.0,
+                100.0,
+            ),
+        )
+        trade_plan = (
+            trend_strategy.TradeInstruction(
+                action="买入",
+                ticker="600519",
+                name="Alpha",
+                from_weight=0.0,
+                to_weight=0.25,
+                reason="新开仓",
+            ),
+        )
+        execution_plan = trend_strategy.build_execution_plan(
+            tuple(),
+            current,
+            trade_plan,
+            {"600519.SS": build_custom_series([95.0, 98.0, 100.0], start=dt.date(2025, 1, 1))},
+            dt.date(2025, 1, 3),
+            trend_strategy.TrendExitRules(stop_loss_pct=0.10, trailing_stop_pct=0.30, trend_break_window=20),
+            trend_strategy.TrendExecutionRules(
+                entry_starter_fraction=0.6,
+                min_add_on_trigger_pct=0.03,
+                max_add_on_trigger_pct=0.08,
+            ),
+        )
+        self.assertEqual(len(execution_plan), 2)
+        self.assertEqual(execution_plan[0].action, "首仓买入")
+        self.assertAlmostEqual(execution_plan[0].to_weight, 0.15, places=4)
+        self.assertEqual(execution_plan[1].action, "突破加仓")
+        self.assertAlmostEqual(execution_plan[1].from_weight, 0.15, places=4)
+        self.assertAlmostEqual(execution_plan[1].to_weight, 0.25, places=4)
+        self.assertGreater(execution_plan[1].trigger_price or 0, 100.0)
 
     def test_sector_exposure_summary_groups_weights(self) -> None:
         picks = (

@@ -32,6 +32,9 @@ MIN_POSITION_WEIGHT = 0.02
 DEFAULT_STOP_LOSS_PCT = 0.12
 DEFAULT_TRAILING_STOP_PCT = 0.15
 DEFAULT_TREND_BREAK_WINDOW = 20
+DEFAULT_ENTRY_STARTER_FRACTION = 0.6
+DEFAULT_MIN_ADD_ON_TRIGGER_PCT = 0.03
+DEFAULT_MAX_ADD_ON_TRIGGER_PCT = 0.08
 MAX_WORKERS = 6
 DEFAULT_COMMISSION_BPS = 2.0
 DEFAULT_SLIPPAGE_BPS = 8.0
@@ -99,10 +102,12 @@ class TrendSnapshot:
     regimes: tuple[RegimeSnapshot, ...]
     constraints: PortfolioConstraints
     exit_rules: TrendExitRules
+    execution_rules: TrendExecutionRules
     market_exposures: tuple[MarketExposure, ...]
     constraint_diagnostics: ConstraintDiagnostics
     previous_rebalance_date: dt.date | None
     trade_plan: tuple[TradeInstruction, ...]
+    execution_plan: tuple[ExecutionInstruction, ...]
     picks: tuple[TrendPick, ...]
 
 
@@ -156,6 +161,13 @@ class TrendExitRules:
 
 
 @dataclasses.dataclass(frozen=True)
+class TrendExecutionRules:
+    entry_starter_fraction: float
+    min_add_on_trigger_pct: float
+    max_add_on_trigger_pct: float
+
+
+@dataclasses.dataclass(frozen=True)
 class ConstraintDiagnostics:
     skipped_sector_position_limit: int = 0
     skipped_sector_weight_limit: int = 0
@@ -171,6 +183,19 @@ class ExitEvent:
     session_date: dt.date
     reason: str
     return_pct: float
+
+
+@dataclasses.dataclass(frozen=True)
+class ExecutionInstruction:
+    action: str
+    ticker: str
+    name: str
+    from_weight: float
+    to_weight: float
+    trigger_price: float | None
+    stop_price: float | None
+    risk_budget_pct: float
+    note: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -442,6 +467,26 @@ def load_exit_rules() -> TrendExitRules:
     )
 
 
+def load_execution_rules() -> TrendExecutionRules:
+    settings = market_close_digest.load_settings()
+    payload = settings.get("trend_execution")
+    entry_starter_fraction = DEFAULT_ENTRY_STARTER_FRACTION
+    min_add_on_trigger_pct = DEFAULT_MIN_ADD_ON_TRIGGER_PCT
+    max_add_on_trigger_pct = DEFAULT_MAX_ADD_ON_TRIGGER_PCT
+    if isinstance(payload, Mapping):
+        entry_starter_fraction = clamp_weight(payload.get("entry_starter_fraction"), entry_starter_fraction)
+        min_add_on_trigger_pct = clamp_weight(payload.get("min_add_on_trigger_pct"), min_add_on_trigger_pct)
+        max_add_on_trigger_pct = clamp_weight(payload.get("max_add_on_trigger_pct"), max_add_on_trigger_pct)
+    entry_starter_fraction = min(max(entry_starter_fraction, 0.2), 1.0)
+    min_add_on_trigger_pct = min(max(min_add_on_trigger_pct, 0.0), 0.2)
+    max_add_on_trigger_pct = min(max(max_add_on_trigger_pct, min_add_on_trigger_pct), 0.2)
+    return TrendExecutionRules(
+        entry_starter_fraction=entry_starter_fraction,
+        min_add_on_trigger_pct=min_add_on_trigger_pct,
+        max_add_on_trigger_pct=max_add_on_trigger_pct,
+    )
+
+
 def summarize_sector_exposures(picks: tuple[TrendPick, ...] | list[TrendPick]) -> tuple[SectorExposure, ...]:
     exposures: dict[str, SectorExposure] = {}
     for item in picks:
@@ -537,6 +582,37 @@ def format_trade_plan_item(item: TradeInstruction) -> str:
     return (
         f"- {item.action} {item.ticker} {item.name} | "
         f"{item.from_weight * 100:.0f}% -> {item.to_weight * 100:.0f}% | {item.reason}"
+    )
+
+
+def execution_rule_summary(execution_rules: TrendExecutionRules) -> str:
+    starter = execution_rules.entry_starter_fraction * 100
+    return (
+        f"首仓 {starter:.0f}% | "
+        f"二次加仓触发 {execution_rules.min_add_on_trigger_pct * 100:.0f}%~"
+        f"{execution_rules.max_add_on_trigger_pct * 100:.0f}%"
+    )
+
+
+def execution_action_rank(action: str) -> int:
+    order = {
+        "立即卖出": 0,
+        "立即减仓": 1,
+        "首仓买入": 2,
+        "首仓加仓": 3,
+        "突破加仓": 4,
+    }
+    return order.get(action, 9)
+
+
+def format_execution_plan_item(item: ExecutionInstruction) -> str:
+    price_label = "触发价" if item.action == "突破加仓" else "参考价"
+    price_text = f"{price_label} {item.trigger_price:.2f}" if item.trigger_price is not None else "价格以盘中成交为准"
+    stop_text = f"止损 {item.stop_price:.2f}" if item.stop_price is not None else "无固定止损价"
+    return (
+        f"- {item.action} {item.ticker} {item.name} | "
+        f"{item.from_weight * 100:.0f}% -> {item.to_weight * 100:.0f}% | "
+        f"{price_text} | {stop_text} | 风险预算 {item.risk_budget_pct * 100:.1f}% | {item.note}"
     )
 
 
@@ -961,6 +1037,7 @@ def build_trend_snapshot(
     target_codes = resolve_market_codes(market)
     active_constraints = constraints or load_portfolio_constraints(target_codes)
     exit_rules = load_exit_rules()
+    execution_rules = load_execution_rules()
     effective_as_of = as_of or dt.date.today()
     benchmark_histories, benchmark_failures = load_histories(
         [UNIVERSE_CONFIGS[code].benchmark_symbol for code in target_codes],
@@ -1016,6 +1093,15 @@ def build_trend_snapshot(
         effective_as_of,
         exit_rules,
     )
+    execution_plan = build_execution_plan(
+        previous_picks,
+        tuple(picks),
+        trade_plan,
+        merged_histories,
+        effective_as_of,
+        exit_rules,
+        execution_rules,
+    )
     invested_weight = round(sum(item.weight for item in picks), 4)
     return TrendSnapshot(
         market_label=market_label(market),
@@ -1028,10 +1114,12 @@ def build_trend_snapshot(
         regimes=tuple(regimes[code] for code in target_codes if code in regimes),
         constraints=active_constraints,
         exit_rules=exit_rules,
+        execution_rules=execution_rules,
         market_exposures=summarize_market_exposures(picks, active_constraints),
         constraint_diagnostics=constraint_diagnostics,
         previous_rebalance_date=previous_date,
         trade_plan=trade_plan,
+        execution_plan=execution_plan,
         picks=tuple(picks),
     )
 
@@ -1057,6 +1145,41 @@ def resolve_previous_rebalance_date(reference_dates: list[dt.date], as_of: dt.da
     if len(eligible) <= REBALANCE_DAYS:
         return None
     return eligible[-(REBALANCE_DAYS + 1)]
+
+
+def reference_price_for_ticker(
+    ticker: str,
+    histories: Mapping[str, list[tuple[dt.date, float]]],
+    as_of: dt.date,
+) -> float | None:
+    history = histories.get(history_symbol_for_ticker(ticker))
+    if history is None:
+        return None
+    return price_on_or_before(history, as_of)
+
+
+def stop_price_from_entry(reference_price: float | None, exit_rules: TrendExitRules) -> float | None:
+    if reference_price in (None, 0) or exit_rules.stop_loss_pct <= 0:
+        return None
+    return round(reference_price * (1.0 - exit_rules.stop_loss_pct), 2)
+
+
+def dynamic_add_on_trigger_pct(pick: TrendPick, execution_rules: TrendExecutionRules) -> float:
+    daily_vol = max(pick.volatility_20d, 0.0) / 100.0 / math.sqrt(252.0)
+    volatility_buffer = daily_vol * 1.5
+    return min(
+        max(execution_rules.min_add_on_trigger_pct, volatility_buffer),
+        execution_rules.max_add_on_trigger_pct,
+    )
+
+
+def tranche_weights(delta_weight: float, execution_rules: TrendExecutionRules) -> tuple[float, float]:
+    starter_weight = round(delta_weight * execution_rules.entry_starter_fraction, 4)
+    add_on_weight = round(delta_weight - starter_weight, 4)
+    if add_on_weight < MIN_POSITION_WEIGHT:
+        starter_weight = round(delta_weight, 4)
+        add_on_weight = 0.0
+    return starter_weight, add_on_weight
 
 
 def detect_exit_reason(
@@ -1291,6 +1414,90 @@ def build_trade_plan(
     ordered = sorted(
         plan,
         key=lambda item: (trade_action_rank(item.action), -(abs(item.to_weight - item.from_weight)), item.ticker),
+    )
+    return tuple(ordered)
+
+
+def build_execution_plan(
+    previous: tuple[TrendPick, ...],
+    current: tuple[TrendPick, ...],
+    trade_plan: tuple[TradeInstruction, ...],
+    histories: Mapping[str, list[tuple[dt.date, float]]],
+    as_of: dt.date,
+    exit_rules: TrendExitRules,
+    execution_rules: TrendExecutionRules,
+) -> tuple[ExecutionInstruction, ...]:
+    previous_map = {item.ticker: item for item in previous}
+    current_map = {item.ticker: item for item in current}
+    instructions: list[ExecutionInstruction] = []
+    for item in trade_plan:
+        current_item = current_map.get(item.ticker)
+        previous_item = previous_map.get(item.ticker)
+        reference_price = reference_price_for_ticker(item.ticker, histories, as_of)
+        if reference_price in (None, 0):
+            reference_price = (current_item or previous_item).close if (current_item or previous_item) is not None else None
+        stop_price = stop_price_from_entry(reference_price, exit_rules)
+        delta_weight = abs(item.to_weight - item.from_weight)
+        if delta_weight <= 0:
+            continue
+        if item.action in {"卖出", "减仓"}:
+            instructions.append(
+                ExecutionInstruction(
+                    action="立即卖出" if item.action == "卖出" else "立即减仓",
+                    ticker=item.ticker,
+                    name=item.name,
+                    from_weight=item.from_weight,
+                    to_weight=item.to_weight,
+                    trigger_price=reference_price,
+                    stop_price=None,
+                    risk_budget_pct=0.0,
+                    note="风控指令优先，次日开盘处理" if "止损" in item.reason or "Risk OFF" in item.reason else item.reason,
+                )
+            )
+            continue
+        if current_item is None:
+            continue
+        starter_weight, add_on_weight = tranche_weights(delta_weight, execution_rules)
+        starter_to_weight = round(item.from_weight + starter_weight, 4)
+        starter_risk = starter_weight * exit_rules.stop_loss_pct if stop_price is not None else 0.0
+        instructions.append(
+            ExecutionInstruction(
+                action="首仓买入" if item.action == "买入" else "首仓加仓",
+                ticker=item.ticker,
+                name=item.name,
+                from_weight=item.from_weight,
+                to_weight=starter_to_weight,
+                trigger_price=reference_price,
+                stop_price=stop_price,
+                risk_budget_pct=starter_risk,
+                note="先打底仓，确认趋势延续后再补齐" if add_on_weight > 0 else "目标仓位一次到位",
+            )
+        )
+        if add_on_weight <= 0:
+            continue
+        trigger_pct = dynamic_add_on_trigger_pct(current_item, execution_rules)
+        add_on_trigger = round(current_item.close * (1.0 + trigger_pct), 2)
+        add_on_risk = add_on_weight * exit_rules.stop_loss_pct if stop_price is not None else 0.0
+        instructions.append(
+            ExecutionInstruction(
+                action="突破加仓",
+                ticker=item.ticker,
+                name=item.name,
+                from_weight=starter_to_weight,
+                to_weight=item.to_weight,
+                trigger_price=add_on_trigger,
+                stop_price=stop_price,
+                risk_budget_pct=add_on_risk,
+                note=f"若放量站上触发价，再补足剩余 {add_on_weight * 100:.0f}% 仓位",
+            )
+        )
+    ordered = sorted(
+        instructions,
+        key=lambda item: (
+            execution_action_rank(item.action),
+            -(abs(item.to_weight - item.from_weight)),
+            item.ticker,
+        ),
     )
     return tuple(ordered)
 
@@ -1621,6 +1828,7 @@ def format_trend_snapshot(
             f"- 单票上限: {snapshot.constraints.max_position_weight * 100:.0f}%",
             f"- 单行业上限: {snapshot.constraints.max_sector_weight * 100:.0f}% / 最多 {snapshot.constraints.max_sector_positions} 只",
             f"- 退出规则: {exit_rule_summary(snapshot.exit_rules)}",
+            f"- 执行规则: {execution_rule_summary(snapshot.execution_rules)}",
         ]
     )
     if snapshot.history_failures:
@@ -1668,9 +1876,13 @@ def format_trend_snapshot(
         lines.append(
             f"   {item.market_label} | {item.sector} | 价格 {item.close:.2f} | 市值 {item.market_cap_b:.0f}B"
         )
+        stop_price = stop_price_from_entry(item.close, snapshot.exit_rules)
+        risk_budget_pct = item.weight * snapshot.exit_rules.stop_loss_pct
         lines.append(
             f"   20D {item.ret20:+.1f}% | 60D {item.ret60:+.1f}% | 120D {item.ret120:+.1f}% | 相对基准 {item.relative_strength_60d:+.1f}%"
         )
+        if stop_price is not None:
+            lines.append(f"   止损线 {stop_price:.2f} | 单票最大亏损拖累约 {risk_budget_pct * 100:.1f}%")
     exposures = summarize_sector_exposures(snapshot.picks)
     if exposures:
         lines.extend(["", "当前行业暴露"])
@@ -1683,6 +1895,10 @@ def format_trend_snapshot(
                 lines.append(format_trade_plan_item(item))
         else:
             lines.append("- 与上一调仓日相比无变化")
+    if snapshot.execution_plan:
+        lines.extend(["", "次日执行清单"])
+        for item in snapshot.execution_plan[:8]:
+            lines.append(format_execution_plan_item(item))
     lines.extend(
         [
             "",
@@ -1690,6 +1906,7 @@ def format_trend_snapshot(
             "- 市场过滤: 基准站上 MA120，且 MA20 > MA60 或 60D 趋势为正时才开仓。",
             "- 选股规则: 价格站上 MA60，MA20 > MA60 > MA120，且 20D/60D 动量均为正。",
             "- 退出规则在回测中按日生效，当前调仓清单按上一调仓日模型仓位推导。",
+            "- 执行清单会把买入/加仓拆成底仓和突破加仓两步，方便更接近实盘执行。",
         ]
     )
     return "\n".join(lines)
@@ -1733,6 +1950,7 @@ def format_backtest_report(
         f"- 成本假设: 佣金 {report.cost_model.commission_bps:.1f}bp | 滑点 {report.cost_model.slippage_bps:.1f}bp | A股卖出税 {report.cost_model.sell_tax_bps.get('CN', 0.0):.1f}bp",
         f"- 当前组合约束: 单票 {report.latest_snapshot.constraints.max_position_weight * 100:.0f}% | 单行业 {report.latest_snapshot.constraints.max_sector_weight * 100:.0f}% | 目标总仓位 {report.latest_snapshot.constraints.target_gross_exposure * 100:.0f}%",
         f"- 退出规则: {exit_rule_summary(report.latest_snapshot.exit_rules)}",
+        f"- 执行规则: {execution_rule_summary(report.latest_snapshot.execution_rules)}",
     ]
     if report.history_failures:
         lines.append(f"- 历史数据抓取失败: {report.history_failures} 个标的已跳过")
@@ -1794,6 +2012,10 @@ def format_backtest_report(
                 lines.append(format_trade_plan_item(item))
         else:
             lines.append("- 最近一期模型仓位无变化")
+    if report.latest_snapshot.execution_plan:
+        lines.extend(["", "最新执行清单"])
+        for item in report.latest_snapshot.execution_plan[:8]:
+            lines.append(format_execution_plan_item(item))
     if report.daily_curve:
         lines.extend(["", "最近净值轨迹"])
         for point in report.daily_curve[-5:]:
