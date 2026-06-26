@@ -154,6 +154,16 @@ class BotServiceTests(unittest.TestCase):
         self.assertEqual(reply.command, "weekly")
         self.assertEqual(reply.text, "weekly output")
 
+    def test_macro_routes_to_macro_opportunity_scan(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.build_macro_opportunity_text",
+            return_value="macro output",
+        ) as build_macro:
+            reply = bot_service.handle_message("宏观机会 全市场")
+        build_macro.assert_called_once_with("全市场")
+        self.assertEqual(reply.command, "macro")
+        self.assertEqual(reply.text, "macro output")
+
     def test_default_market_is_used_when_configured(self) -> None:
         with (
             mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={"default_market": "A股"}),

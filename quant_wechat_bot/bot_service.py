@@ -18,9 +18,10 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import data_sources, quant_engine, trend_strategy
+    from . import data_sources, macro_opportunity, quant_engine, trend_strategy
 except ImportError:  # pragma: no cover - allows `python3 quant_wechat_bot/bot_service.py serve`
     import data_sources  # type: ignore
+    import macro_opportunity  # type: ignore
     import quant_engine  # type: ignore
     import trend_strategy  # type: ignore
 
@@ -171,6 +172,7 @@ def help_text() -> str:
         21. 交易计划 A股
         22. 推荐日报 全市场 3
         23. 周复盘 全市场 5 6
+        24. 宏观机会 全市场
 
         Slash commands:
         - /help
@@ -184,6 +186,7 @@ def help_text() -> str:
         - /plan [market] [top_n]
         - /ideas [market] [top_n]
         - /weekly [market] [top_n] [months]
+        - /macro [market]
 
         提醒:
         - `样本池` 是仓库自带的小样本
@@ -593,6 +596,11 @@ def render_weekly_review_text(market: str | None = None, top_n: int = 5, months:
     )
 
 
+def render_macro_opportunity_text(market: str | None = None) -> str:
+    effective_market = market if market is not None else "全市场"
+    return truncate_reply(macro_opportunity.format_macro_scan(effective_market))
+
+
 def render_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
     return truncate_reply(
@@ -818,6 +826,11 @@ def build_weekly_review_text(market: str | None = None, top_n: int = 5, months: 
     return render_weekly_review_text(effective_market, top_n=top_n, months=months)
 
 
+def build_macro_opportunity_text(market: str | None = None) -> str:
+    effective_market = market if market is not None else "全市场"
+    return render_macro_opportunity_text(effective_market)
+
+
 def build_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
     cached = load_precomputed_reply("backtest", effective_market, top_n=top_n, months=months)
@@ -896,6 +909,10 @@ def dispatch_message(message: str) -> BotReply:
         months = int(weekly_match.group(3) or "6")
         return BotReply(build_weekly_review_text(weekly_match.group(1), top_n=top_n, months=months), "weekly")
 
+    macro_match = re.match(r"^(?:/macro|宏观机会|宏观扫描|机会扫描)(?:\s+([^\s]+))?$", normalized, re.I)
+    if macro_match:
+        return BotReply(build_macro_opportunity_text(macro_match.group(1)), "macro")
+
     pick_match = re.match(r"^/(?:pick)\s+([^\s]+)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
     if pick_match:
         top_n = int(pick_match.group(3) or "5")
@@ -928,7 +945,7 @@ def dispatch_message(message: str) -> BotReply:
         return BotReply(build_screen_text("defensive"), "pick")
 
     return BotReply(
-        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 推荐日报 全市场 3\n- 周复盘 全市场 5 6\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 交易计划 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
+        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 宏观机会 全市场\n- 推荐日报 全市场 3\n- 周复盘 全市场 5 6\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 交易计划 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
         "help",
     )
 

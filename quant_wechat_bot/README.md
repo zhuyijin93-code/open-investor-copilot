@@ -86,6 +86,8 @@ Try:
 - `收盘总结 A股`
 - `收盘总结 港股`
 - `收盘总结 美股`
+- `宏观机会 全市场`
+- `宏观机会 美股`
 - `推荐日报 全市场 3`
 - `推荐日报 A股 3`
 - `每日推荐 美股 3`
@@ -102,6 +104,7 @@ Slash commands also work:
 - `/score 600519 A股`
 - `/universe A股`
 - `/close A股`
+- `/macro 全市场`
 - `/ideas 全市场 3`
 - `/weekly 全市场 5 6`
 
@@ -351,6 +354,31 @@ Behavior:
 - highlights the highest-priority entry candidates plus any immediate risk-off exits
 - includes budget and estimated shares when `trend_order_sizing` is configured
 - keeps dedupe state in `quant_wechat_bot/.cache/recommendation_digest_state.json`
+
+## Macro Opportunity Scan
+
+If you want a faster top-down read before drilling into single stocks, the bot
+now supports a macro opportunity scan.
+
+Preview locally:
+
+```bash
+python3 -m quant_wechat_bot.bot_service chat "宏观机会 全市场"
+python3 -m quant_wechat_bot.bot_service chat "宏观机会 美股"
+```
+
+What it does:
+
+- scans cross-market broad indices, growth proxies, style ETFs, and defensive assets
+- summarizes whether the environment is `偏进攻 / 中性轮动 / 偏防守`
+- highlights the strongest tradable macro themes first
+- flags the weakest areas that are better treated as `降权/回避`
+
+Typical workflow:
+
+1. run `宏观机会`
+2. decide whether you want to lean into growth, defense, finance, energy, or stay cautious
+3. then drop into `推荐日报` or `交易计划` for the actual stock-level execution
 
 Scheduled templates:
 
