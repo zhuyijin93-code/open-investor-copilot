@@ -6,6 +6,7 @@ import dataclasses
 import datetime as dt
 import math
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Callable
 
@@ -26,6 +27,13 @@ DEFAULT_TOP_N = 5
 MAX_POSITION_WEIGHT = 0.25
 MAX_SECTOR_POSITIONS = 2
 MAX_WORKERS = 6
+DEFAULT_COMMISSION_BPS = 2.0
+DEFAULT_SLIPPAGE_BPS = 8.0
+DEFAULT_SELL_TAX_BPS = {
+    "CN": 10.0,
+    "HK": 0.0,
+    "US": 0.0,
+}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,14 +95,35 @@ class TrendSnapshot:
 
 
 @dataclasses.dataclass(frozen=True)
+class BacktestCostModel:
+    commission_bps: float
+    slippage_bps: float
+    sell_tax_bps: dict[str, float]
+
+
+@dataclasses.dataclass(frozen=True)
+class PeriodContribution:
+    ticker: str
+    name: str
+    weight: float
+    asset_return: float
+    contribution: float
+
+
+@dataclasses.dataclass(frozen=True)
 class BacktestPeriod:
     start_date: dt.date
     end_date: dt.date
+    gross_return: float
+    cost_drag: float
     portfolio_return: float
     invested_weight: float
     turnover: float
+    buy_turnover: float
+    sell_turnover: float
     holdings: tuple[TrendPick, ...]
     risk_on_markets: tuple[str, ...]
+    contributions: tuple[PeriodContribution, ...]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,12 +134,16 @@ class BacktestReport:
     candidate_count: int
     evaluated_count: int
     history_failures: int
+    gross_total_return: float
+    total_cost_drag: float
     total_return: float
     annualized_return: float
     max_drawdown: float
     win_rate: float
+    average_cost_drag: float
     average_period_return: float
     average_turnover: float
+    cost_model: BacktestCostModel
     periods: tuple[BacktestPeriod, ...]
     latest_snapshot: TrendSnapshot
 
@@ -185,6 +218,31 @@ def history_symbol_for_ticker(ticker: str) -> str:
             return f"{upper}.SS"
         return f"{upper}.SZ"
     return upper
+
+
+def load_backtest_cost_model() -> BacktestCostModel:
+    settings = market_close_digest.load_settings()
+    commission_bps = DEFAULT_COMMISSION_BPS
+    slippage_bps = DEFAULT_SLIPPAGE_BPS
+    sell_tax_bps = dict(DEFAULT_SELL_TAX_BPS)
+    payload = settings.get("trend_backtest_costs")
+    if isinstance(payload, Mapping):
+        raw_commission = payload.get("commission_bps")
+        raw_slippage = payload.get("slippage_bps")
+        if isinstance(raw_commission, (int, float)):
+            commission_bps = float(raw_commission)
+        if isinstance(raw_slippage, (int, float)):
+            slippage_bps = float(raw_slippage)
+        raw_sell_tax = payload.get("sell_tax_bps")
+        if isinstance(raw_sell_tax, Mapping):
+            for key, value in raw_sell_tax.items():
+                if isinstance(key, str) and isinstance(value, (int, float)):
+                    sell_tax_bps[key.strip().upper()] = float(value)
+    return BacktestCostModel(
+        commission_bps=commission_bps,
+        slippage_bps=slippage_bps,
+        sell_tax_bps=sell_tax_bps,
+    )
 
 
 def cache_path_for_symbol(symbol: str) -> Path:
@@ -595,7 +653,24 @@ def period_return(
     start_date: dt.date,
     end_date: dt.date,
 ) -> float:
-    total = 0.0
+    return sum(
+        item.contribution
+        for item in period_contributions(
+            picks,
+            histories,
+            start_date,
+            end_date,
+        )
+    )
+
+
+def period_contributions(
+    picks: tuple[TrendPick, ...],
+    histories: dict[str, list[tuple[dt.date, float]]],
+    start_date: dt.date,
+    end_date: dt.date,
+) -> tuple[PeriodContribution, ...]:
+    contributions: list[PeriodContribution] = []
     for item in picks:
         history = histories.get(item.history_symbol)
         if history is None:
@@ -604,8 +679,17 @@ def period_return(
         end_price = price_on_or_before(history, end_date)
         if start_price in (None, 0) or end_price is None:
             continue
-        total += item.weight * (end_price / start_price - 1.0)
-    return total
+        asset_return = end_price / start_price - 1.0
+        contributions.append(
+            PeriodContribution(
+                ticker=item.ticker,
+                name=item.name,
+                weight=item.weight,
+                asset_return=asset_return,
+                contribution=item.weight * asset_return,
+            )
+        )
+    return tuple(sorted(contributions, key=lambda item: item.contribution, reverse=True))
 
 
 def turnover_ratio(previous: tuple[TrendPick, ...], current: tuple[TrendPick, ...]) -> float:
@@ -613,6 +697,29 @@ def turnover_ratio(previous: tuple[TrendPick, ...], current: tuple[TrendPick, ..
     current_weights = {item.ticker: item.weight for item in current}
     tickers = set(previous_weights) | set(current_weights)
     return sum(abs(current_weights.get(ticker, 0.0) - previous_weights.get(ticker, 0.0)) for ticker in tickers) / 2.0
+
+
+def turnover_breakdown(previous: tuple[TrendPick, ...], current: tuple[TrendPick, ...]) -> tuple[float, float]:
+    previous_weights = {item.ticker: item.weight for item in previous}
+    current_weights = {item.ticker: item.weight for item in current}
+    tickers = set(previous_weights) | set(current_weights)
+    buy_turnover = sum(max(current_weights.get(ticker, 0.0) - previous_weights.get(ticker, 0.0), 0.0) for ticker in tickers)
+    sell_turnover = sum(max(previous_weights.get(ticker, 0.0) - current_weights.get(ticker, 0.0), 0.0) for ticker in tickers)
+    return buy_turnover, sell_turnover
+
+
+def transaction_cost_drag(
+    previous: tuple[TrendPick, ...],
+    current: tuple[TrendPick, ...],
+    cost_model: BacktestCostModel,
+) -> tuple[float, float, float]:
+    buy_turnover, sell_turnover = turnover_breakdown(previous, current)
+    buy_cost_bps = cost_model.commission_bps + cost_model.slippage_bps
+    inferred_market_code = infer_market_code(current[0].ticker) if current else infer_market_code(previous[0].ticker) if previous else "US"
+    sell_tax_bps = cost_model.sell_tax_bps.get(inferred_market_code, 0.0)
+    sell_cost_bps = cost_model.commission_bps + cost_model.slippage_bps + sell_tax_bps
+    cost_drag = buy_turnover * buy_cost_bps / 10000.0 + sell_turnover * sell_cost_bps / 10000.0
+    return buy_turnover, sell_turnover, cost_drag
 
 
 def max_drawdown(equity_curve: list[float]) -> float:
@@ -662,7 +769,9 @@ def backtest_trend_strategy(
         raise RuntimeError("Not enough rebalance dates after the warm-up window.")
     periods: list[BacktestPeriod] = []
     previous_holdings: tuple[TrendPick, ...] = tuple()
-    equity_curve = [1.0]
+    gross_equity_curve = [1.0]
+    net_equity_curve = [1.0]
+    cost_model = load_backtest_cost_model()
     for start_date, end_date in zip(rebalance_dates[:-1], rebalance_dates[1:]):
         regimes: dict[str, RegimeSnapshot] = {}
         for code in target_codes:
@@ -677,19 +786,28 @@ def backtest_trend_strategy(
             top_n=top_n,
         )
         current_holdings = tuple(holdings)
-        realized_return = period_return(current_holdings, histories, start_date, end_date)
-        equity_curve.append(equity_curve[-1] * (1.0 + realized_return))
+        contributions = period_contributions(current_holdings, histories, start_date, end_date)
+        gross_return = sum(item.contribution for item in contributions)
+        buy_turnover, sell_turnover, cost_drag = transaction_cost_drag(previous_holdings, current_holdings, cost_model)
+        realized_return = gross_return - cost_drag
+        gross_equity_curve.append(gross_equity_curve[-1] * (1.0 + gross_return))
+        net_equity_curve.append(net_equity_curve[-1] * (1.0 + realized_return))
         periods.append(
             BacktestPeriod(
                 start_date=start_date,
                 end_date=end_date,
+                gross_return=gross_return,
+                cost_drag=cost_drag,
                 portfolio_return=realized_return,
                 invested_weight=round(sum(item.weight for item in current_holdings), 4),
                 turnover=round(turnover_ratio(previous_holdings, current_holdings), 4),
+                buy_turnover=round(buy_turnover, 4),
+                sell_turnover=round(sell_turnover, 4),
                 holdings=current_holdings,
                 risk_on_markets=tuple(
                     regimes[code].market_label for code in target_codes if code in regimes and regimes[code].risk_on
                 ),
+                contributions=contributions,
             )
         )
         previous_holdings = current_holdings
@@ -700,10 +818,12 @@ def backtest_trend_strategy(
         as_of=rebalance_dates[-1],
         history_fetcher=history_fetcher,
     )
-    total_return = equity_curve[-1] - 1.0
+    gross_total_return = gross_equity_curve[-1] - 1.0
+    total_return = net_equity_curve[-1] - 1.0
     calendar_days = max((periods[-1].end_date - periods[0].start_date).days, 1)
-    annualized_return = (equity_curve[-1] ** (365.0 / calendar_days) - 1.0) if equity_curve[-1] > 0 else -1.0
+    annualized_return = (net_equity_curve[-1] ** (365.0 / calendar_days) - 1.0) if net_equity_curve[-1] > 0 else -1.0
     positive_periods = sum(1 for item in periods if item.portfolio_return > 0)
+    average_cost_drag = sum(item.cost_drag for item in periods) / len(periods)
     average_period_return = sum(item.portfolio_return for item in periods) / len(periods)
     average_turnover = sum(item.turnover for item in periods) / len(periods)
     return BacktestReport(
@@ -713,12 +833,16 @@ def backtest_trend_strategy(
         candidate_count=len(rows),
         evaluated_count=latest_snapshot.evaluated_count,
         history_failures=len(failures),
+        gross_total_return=gross_total_return,
+        total_cost_drag=gross_total_return - total_return,
         total_return=total_return,
         annualized_return=annualized_return,
-        max_drawdown=max_drawdown(equity_curve),
+        max_drawdown=max_drawdown(net_equity_curve),
         win_rate=positive_periods / len(periods),
+        average_cost_drag=average_cost_drag,
         average_period_return=average_period_return,
         average_turnover=average_turnover,
+        cost_model=cost_model,
         periods=tuple(periods),
         latest_snapshot=latest_snapshot,
     )
@@ -827,12 +951,16 @@ def format_backtest_report(
         f"调仓节奏: 每 {REBALANCE_DAYS} 个交易日。",
         "",
         "回测结果",
+        f"- 毛收益: {report.gross_total_return * 100:+.1f}%",
+        f"- 成本拖累: {-report.total_cost_drag * 100:+.1f}%",
         f"- 累计收益: {report.total_return * 100:+.1f}%",
         f"- 年化收益: {report.annualized_return * 100:+.1f}%",
         f"- 最大回撤: {report.max_drawdown * 100:.1f}%",
         f"- 胜率: {report.win_rate * 100:.0f}%",
+        f"- 平均单期成本: {report.average_cost_drag * 100:.2f}%",
         f"- 平均单期收益: {report.average_period_return * 100:+.2f}%",
         f"- 平均换手: {report.average_turnover * 100:.0f}%",
+        f"- 成本假设: 佣金 {report.cost_model.commission_bps:.1f}bp | 滑点 {report.cost_model.slippage_bps:.1f}bp | A股卖出税 {report.cost_model.sell_tax_bps.get('CN', 0.0):.1f}bp",
     ]
     if report.history_failures:
         lines.append(f"- 历史数据抓取失败: {report.history_failures} 个标的已跳过")
@@ -842,8 +970,14 @@ def format_backtest_report(
         for period in recent_periods:
             regime_text = " / ".join(period.risk_on_markets) if period.risk_on_markets else "全部 Risk OFF"
             lines.append(
-                f"- {period.start_date.isoformat()} -> {period.end_date.isoformat()} | 收益 {period.portfolio_return * 100:+.2f}% | 换手 {period.turnover * 100:.0f}% | 风险开关 {regime_text}"
+                f"- {period.start_date.isoformat()} -> {period.end_date.isoformat()} | 毛收益 {period.gross_return * 100:+.2f}% | 成本 {-period.cost_drag * 100:+.2f}% | 净收益 {period.portfolio_return * 100:+.2f}% | 换手 {period.turnover * 100:.0f}% | 风险开关 {regime_text}"
             )
+            if period.contributions:
+                best = period.contributions[0]
+                worst = period.contributions[-1]
+                lines.append(
+                    f"  归因: 最强 {best.ticker} {best.contribution * 100:+.2f}% | 最弱 {worst.ticker} {worst.contribution * 100:+.2f}%"
+                )
     latest = report.latest_snapshot
     lines.extend(["", "当前信号"])
     if latest.picks:
@@ -859,7 +993,7 @@ def format_backtest_report(
             "注意:",
             "- 这是一版可执行 MVP，不是机构级回测引擎。",
             "- 当前回看仍有生存者偏差，因为候选池来自今天仍在库里的股票。",
-            "- 下一步最值得补的是真实财务因子、交易成本模型和逐日持仓归因。",
+            "- 下一步最值得补的是真实财务因子、行业暴露约束和逐日净值曲线导出。",
         ]
     )
     return "\n".join(lines)

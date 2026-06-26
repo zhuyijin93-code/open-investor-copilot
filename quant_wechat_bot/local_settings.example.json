@@ -6,6 +6,20 @@
   "a_share_limit": 0,
   "a_share_min_amount_yuan": 0,
   "a_share_cache_seconds": 900,
+  "trend_backtest_costs": {
+    "commission_bps": 2,
+    "slippage_bps": 8,
+    "sell_tax_bps": {
+      "CN": 10,
+      "HK": 0,
+      "US": 0
+    }
+  },
+  "close_digest_watchlists": {
+    "A股": ["600519.SS", "300750.SZ"],
+    "HK": ["0700.HK", "9988.HK", "3690.HK"],
+    "US": ["NVDA", "MSFT", "TSLA"]
+  },
   "wechat_official_token": "replace-with-your-token",
   "wechat_menu_actions": {
     "MENU_HELP": "帮助",

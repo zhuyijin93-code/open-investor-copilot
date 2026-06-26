@@ -5,6 +5,7 @@ import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from quant_wechat_bot import trend_strategy
 
@@ -128,17 +129,38 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(snapshot.cash_weight, 1.0, places=3)
 
     def test_backtest_report_is_positive_for_rising_trend_names(self) -> None:
-        report = trend_strategy.backtest_trend_strategy(
-            self.universe_path,
-            "A股",
-            lookback_months=6,
-            top_n=2,
-            history_fetcher=self.histories.__getitem__,
-        )
+        with mock.patch("quant_wechat_bot.trend_strategy.market_close_digest.load_settings", return_value={}):
+            report = trend_strategy.backtest_trend_strategy(
+                self.universe_path,
+                "A股",
+                lookback_months=6,
+                top_n=2,
+                history_fetcher=self.histories.__getitem__,
+            )
         self.assertGreater(report.total_return, 0)
+        self.assertGreater(report.gross_total_return, report.total_return)
+        self.assertGreater(report.total_cost_drag, 0)
         self.assertGreater(report.win_rate, 0.5)
         self.assertTrue(report.periods)
         self.assertTrue(report.latest_snapshot.picks)
+        self.assertGreater(report.average_cost_drag, 0)
+        self.assertTrue(report.periods[-1].contributions)
+
+    def test_backtest_cost_model_can_be_overridden_from_settings(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.trend_strategy.market_close_digest.load_settings",
+            return_value={
+                "trend_backtest_costs": {
+                    "commission_bps": 1.5,
+                    "slippage_bps": 4.0,
+                    "sell_tax_bps": {"CN": 12.0},
+                }
+            },
+        ):
+            cost_model = trend_strategy.load_backtest_cost_model()
+        self.assertEqual(cost_model.commission_bps, 1.5)
+        self.assertEqual(cost_model.slippage_bps, 4.0)
+        self.assertEqual(cost_model.sell_tax_bps["CN"], 12.0)
 
 
 if __name__ == "__main__":
