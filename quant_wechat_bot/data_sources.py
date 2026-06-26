@@ -85,11 +85,8 @@ def _is_tradeable_hk_share(item: dict[str, Any], min_amount: float = 0.0) -> boo
     if checked is None:
         return False
     code, name, _, _ = checked
-    sector = str(item.get("f100") or "").strip()
     upper_name = name.upper()
     if not code.isdigit() or len(code) != 5:
-        return False
-    if sector in {"", "-"}:
         return False
     return not any(fragment in upper_name for fragment in HK_EXCLUDED_NAME_PARTS)
 
@@ -99,13 +96,10 @@ def _is_tradeable_us_share(item: dict[str, Any], min_amount: float = 0.0) -> boo
     if checked is None:
         return False
     code, name, _, _ = checked
-    sector = str(item.get("f100") or "").strip()
     upper_name = name.upper()
     if not code.replace(".", "").replace("-", "").isalnum():
         return False
     if len(code) == 5 and code[-1] in {"W", "R", "U", "V", "Z"}:
-        return False
-    if sector in {"", "-"}:
         return False
     return not any(fragment in upper_name for fragment in US_EXCLUDED_NAME_PARTS)
 
