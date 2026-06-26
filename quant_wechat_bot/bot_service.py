@@ -140,6 +140,20 @@ def load_local_settings() -> dict[str, Any]:
     return json.loads(candidate.read_text(encoding="utf-8"))
 
 
+def read_env_setting(name: str) -> str | None:
+    value = os.environ.get(name)
+    if value and value.strip():
+        return value.strip()
+    return None
+
+
+def is_render_deployment() -> bool:
+    return any(
+        read_env_setting(name)
+        for name in ("RENDER", "RENDER_SERVICE_ID", "RENDER_EXTERNAL_URL", "RENDER_SERVICE_NAME")
+    )
+
+
 def resolve_universe_path(market: str | None = None) -> Path:
     settings = load_local_settings()
     requested_market = market if market is not None else resolve_default_market()
@@ -183,6 +197,9 @@ def normalize_market(value: str | None) -> str:
 
 
 def resolve_default_strategy() -> str:
+    env_value = read_env_setting("QUANT_WECHAT_DEFAULT_STRATEGY")
+    if env_value is not None:
+        return env_value
     settings = load_local_settings()
     value = settings.get("default_strategy") if isinstance(settings, dict) else None
     if isinstance(value, str) and value.strip():
@@ -191,10 +208,15 @@ def resolve_default_strategy() -> str:
 
 
 def resolve_default_market() -> str:
+    env_value = read_env_setting("QUANT_WECHAT_DEFAULT_MARKET")
+    if env_value is not None:
+        return env_value
     settings = load_local_settings()
     value = settings.get("default_market") if isinstance(settings, dict) else None
     if isinstance(value, str) and value.strip():
         return value.strip()
+    if is_render_deployment():
+        return "A股"
     return "sample"
 
 

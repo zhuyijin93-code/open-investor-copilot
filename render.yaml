@@ -7,5 +7,7 @@ services:
     autoDeploy: true
     healthCheckPath: /
     envVars:
+      - key: QUANT_WECHAT_DEFAULT_MARKET
+        value: A股
       - key: WECHAT_OFFICIAL_TOKEN
         sync: false

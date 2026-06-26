@@ -84,6 +84,14 @@ class BotServiceTests(unittest.TestCase):
         self.assertEqual(reply, "ok")
         render.assert_called_once()
 
+    def test_default_market_prefers_environment_variable(self) -> None:
+        with mock.patch.dict("os.environ", {"QUANT_WECHAT_DEFAULT_MARKET": "A股"}, clear=True):
+            self.assertEqual(bot_service.resolve_default_market(), "A股")
+
+    def test_render_deployment_defaults_to_a_share_market(self) -> None:
+        with mock.patch.dict("os.environ", {"RENDER_SERVICE_ID": "srv-test"}, clear=True):
+            self.assertEqual(bot_service.resolve_default_market(), "A股")
+
     def test_verify_wechat_signature(self) -> None:
         signature = bot_service.wechat_signature("token123", "1718000000", "nonce456")
         self.assertTrue(
