@@ -28,6 +28,16 @@ class QuantEngineTests(unittest.TestCase):
 
 
 class BotServiceTests(unittest.TestCase):
+    def test_bind_defaults_to_localhost_without_cloud_port(self) -> None:
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(bot_service.resolve_bind_host(), "127.0.0.1")
+            self.assertEqual(bot_service.resolve_bind_port(), 8790)
+
+    def test_bind_defaults_to_public_host_when_port_is_provided(self) -> None:
+        with mock.patch.dict("os.environ", {"PORT": "10080"}, clear=True):
+            self.assertEqual(bot_service.resolve_bind_host(), "0.0.0.0")
+            self.assertEqual(bot_service.resolve_bind_port(), 10080)
+
     def test_help_shortcut_returns_help(self) -> None:
         reply = bot_service.handle_message("帮助")
         self.assertEqual(reply.command, "help")
@@ -53,6 +63,16 @@ class BotServiceTests(unittest.TestCase):
         build_screen.assert_called_once_with("质量", top_n=5, market="A股")
         self.assertEqual(reply.command, "pick")
         self.assertEqual(reply.text, "a output")
+
+    def test_close_digest_routes_to_market_summary(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.build_close_digest_text",
+            return_value="digest output",
+        ) as build_digest:
+            reply = bot_service.handle_message("收盘总结 美股")
+        build_digest.assert_called_once_with("美股")
+        self.assertEqual(reply.command, "close")
+        self.assertEqual(reply.text, "digest output")
 
     def test_default_market_is_used_when_configured(self) -> None:
         with (
