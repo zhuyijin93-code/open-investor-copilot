@@ -116,8 +116,21 @@ class BotServiceTests(unittest.TestCase):
         ):
             self.assertEqual(bot_service.resolve_default_market(), "全市场")
 
+    def test_render_deployment_prefers_bundled_global_snapshot(self) -> None:
+        bundled = PROJECT_ROOT / "universe_snapshots" / "global_snapshot.csv"
+        with (
+            mock.patch.dict("os.environ", {"RENDER_SERVICE_ID": "srv-test"}, clear=True),
+            mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
+            mock.patch("quant_wechat_bot.bot_service.resolve_bundled_universe_path", return_value=bundled),
+            mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_global_universe") as refresh,
+        ):
+            path = bot_service.resolve_universe_path("全市场")
+        self.assertEqual(path, bundled)
+        refresh.assert_not_called()
+
     def test_resolve_universe_path_supports_hk_market(self) -> None:
         with (
+            mock.patch("quant_wechat_bot.bot_service.prefer_bundled_universes", return_value=False),
             mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
             mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_hk_share_universe", return_value=PROJECT_ROOT / ".cache" / "hk.csv") as refresh,
         ):
@@ -127,6 +140,7 @@ class BotServiceTests(unittest.TestCase):
 
     def test_resolve_universe_path_supports_global_market(self) -> None:
         with (
+            mock.patch("quant_wechat_bot.bot_service.prefer_bundled_universes", return_value=False),
             mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
             mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_global_universe", return_value=PROJECT_ROOT / ".cache" / "global.csv") as refresh,
         ):

@@ -29,6 +29,7 @@ MAX_REPLY_CHARS = 3600
 WECHAT_REPLY_CHARS = 1200
 WECHAT_CALLBACK_PATH = "/wechat/callback"
 PROJECT_ROOT = Path(__file__).resolve().parent
+SNAPSHOT_ROOT = PROJECT_ROOT / "universe_snapshots"
 DEFAULT_SETTINGS_PATH = PROJECT_ROOT / ".cache" / "local_settings.json"
 DEFAULT_WECHAT_MENU_ACTIONS = {
     "MENU_HELP": "帮助",
@@ -168,10 +169,39 @@ def resolve_configured_path(settings: dict[str, Any], key: str, fallback_name: s
     return PROJECT_ROOT / ".cache" / fallback_name
 
 
+def resolve_snapshot_path(name: str) -> Path:
+    return SNAPSHOT_ROOT / name
+
+
+def prefer_bundled_universes() -> bool:
+    override = read_env_setting("QUANT_WECHAT_PREFER_BUNDLED_UNIVERSES")
+    if override is not None:
+        return override.strip().lower() not in {"0", "false", "no", "off"}
+    return is_render_deployment()
+
+
+def resolve_bundled_universe_path(market: str) -> Path | None:
+    snapshot_map = {
+        "a": resolve_snapshot_path("a_share_snapshot.csv"),
+        "hk": resolve_snapshot_path("hk_share_snapshot.csv"),
+        "us": resolve_snapshot_path("us_share_snapshot.csv"),
+        "all": resolve_snapshot_path("global_snapshot.csv"),
+        "global": resolve_snapshot_path("global_snapshot.csv"),
+    }
+    candidate = snapshot_map.get(market)
+    if candidate and candidate.exists():
+        return candidate
+    return None
+
+
 def resolve_universe_path(market: str | None = None) -> Path:
     settings = load_local_settings()
     requested_market = market if market is not None else resolve_default_market()
     normalized_market = normalize_market(requested_market)
+    if prefer_bundled_universes():
+        bundled = resolve_bundled_universe_path(normalized_market)
+        if bundled is not None:
+            return bundled
     if normalized_market == "a":
         candidate = resolve_configured_path(settings, "a_share_universe_csv", "a_share_universe.csv")
         limit = int(settings.get("a_share_limit", 0)) if isinstance(settings, dict) else 0

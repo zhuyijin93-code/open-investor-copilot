@@ -2,19 +2,23 @@ from __future__ import annotations
 
 import csv
 import json
+import subprocess
 import time
 import urllib.parse
 import urllib.request
+from urllib.error import HTTPError, URLError
 from pathlib import Path
 from typing import Any
 
 EASTMONEY_A_SHARE_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 EASTMONEY_FIELDS = "f12,f14,f2,f3,f5,f6,f20,f21,f9,f23,f8,f10,f15,f16,f17,f18,f62,f100,f115,f152"
 EASTMONEY_FS_A_SHARE = "m:1+t:2,m:0+t:6,m:0+t:80"
-EASTMONEY_FS_HK = "m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2"
-EASTMONEY_FS_US = "m:105,m:106,m:107"
-EASTMONEY_PAGE_SIZE = 20000
+EASTMONEY_FS_HK_SEGMENTS = ("m:128+t:3", "m:128+t:4", "m:128+t:1", "m:128+t:2")
+EASTMONEY_FS_US_SEGMENTS = ("m:105", "m:106", "m:107")
+EASTMONEY_PAGE_SIZE = 5000
 SINA_A_SHARE_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
+FETCH_RETRY_COUNT = 4
+FETCH_RETRY_BASE_SECONDS = 1.0
 CSV_FIELDS = [
     "ticker",
     "name",
@@ -116,6 +120,30 @@ def _a_share_sector(code: str) -> str:
     return "A股"
 
 
+def _read_json_url(url: str, *, headers: dict[str, str], encoding: str = "utf-8", timeout: int = 20) -> Any:
+    last_error: Exception | None = None
+    for attempt in range(1, FETCH_RETRY_COUNT + 1):
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode(encoding))
+        except (HTTPError, URLError, TimeoutError, ConnectionError, OSError) as exc:
+            last_error = exc
+            if attempt >= FETCH_RETRY_COUNT:
+                break
+            time.sleep(FETCH_RETRY_BASE_SECONDS * attempt)
+    curl_args = ["curl", "-sS", "--max-time", str(timeout)]
+    for key, value in headers.items():
+        curl_args.extend(["-H", f"{key}: {value}"])
+    curl_args.append(url)
+    try:
+        completed = subprocess.run(curl_args, capture_output=True, check=True, text=True)
+        return json.loads(completed.stdout)
+    except Exception:
+        assert last_error is not None
+        raise last_error
+
+
 def _fetch_eastmoney_page(page: int, page_size: int, fs: str) -> dict[str, Any]:
     params = {
         "pn": page,
@@ -130,15 +158,14 @@ def _fetch_eastmoney_page(page: int, page_size: int, fs: str) -> dict[str, Any]:
         "fields": EASTMONEY_FIELDS,
     }
     url = EASTMONEY_A_SHARE_URL + "?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(
+    return _read_json_url(
         url,
         headers={
             "User-Agent": "Mozilla/5.0 QuantWeChatBot/1.0",
             "Referer": "https://quote.eastmoney.com/",
+            "Accept": "application/json,text/plain,*/*",
         },
     )
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.loads(response.read().decode("utf-8"))
 
 
 def _eastmoney_market_cap_b(raw_value: Any) -> float:
@@ -213,6 +240,43 @@ def _fetch_market_rows(
     return rows
 
 
+def _fetch_market_rows_by_segments(
+    *,
+    fs_segments: tuple[str, ...],
+    market: str,
+    limit: int,
+    min_amount: float,
+    validator: Any,
+) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    errors: list[str] = []
+    for fs in fs_segments:
+        remaining = max(limit - len(merged), 0) if limit and limit > 0 else 0
+        try:
+            rows = _fetch_market_rows(
+                fs=fs,
+                market=market,
+                limit=remaining,
+                min_amount=min_amount,
+                validator=validator,
+            )
+        except Exception as exc:
+            errors.append(f"{fs}: {exc}")
+            continue
+        for row in rows:
+            ticker = str(row.get("ticker") or "").strip().upper()
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            merged.append(row)
+            if limit and limit > 0 and len(merged) >= limit:
+                return merged
+    if merged:
+        return merged
+    raise RuntimeError(" | ".join(errors) if errors else f"No {market} market rows returned.")
+
+
 def _fetch_sina_page(page: int, page_size: int) -> list[dict[str, Any]]:
     params = {
         "page": page,
@@ -224,9 +288,11 @@ def _fetch_sina_page(page: int, page_size: int) -> list[dict[str, Any]]:
         "_s_r_a": "init",
     }
     url = SINA_A_SHARE_URL + "?" + urllib.parse.urlencode(params)
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 QuantWeChatBot/1.0"})
-    with urllib.request.urlopen(request, timeout=20) as response:
-        return json.loads(response.read().decode("gbk"))
+    return _read_json_url(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 QuantWeChatBot/1.0"},
+        encoding="gbk",
+    )
 
 
 def _normalize_sina_row(item: dict[str, Any]) -> dict[str, str] | None:
@@ -301,8 +367,8 @@ def fetch_a_share_rows(limit: int = 0, min_amount_yuan: float = 0.0) -> list[dic
 
 
 def fetch_hk_share_rows(limit: int = 0, min_amount_hkd: float = 0.0) -> list[dict[str, str]]:
-    rows = _fetch_market_rows(
-        fs=EASTMONEY_FS_HK,
+    rows = _fetch_market_rows_by_segments(
+        fs_segments=EASTMONEY_FS_HK_SEGMENTS,
         market="hk",
         limit=limit,
         min_amount=min_amount_hkd,
@@ -314,8 +380,8 @@ def fetch_hk_share_rows(limit: int = 0, min_amount_hkd: float = 0.0) -> list[dic
 
 
 def fetch_us_share_rows(limit: int = 0, min_amount_usd: float = 0.0) -> list[dict[str, str]]:
-    rows = _fetch_market_rows(
-        fs=EASTMONEY_FS_US,
+    rows = _fetch_market_rows_by_segments(
+        fs_segments=EASTMONEY_FS_US_SEGMENTS,
         market="us",
         limit=limit,
         min_amount=min_amount_usd,
