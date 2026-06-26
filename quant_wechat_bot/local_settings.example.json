@@ -36,6 +36,26 @@
     "min_add_on_trigger_pct": 0.03,
     "max_add_on_trigger_pct": 0.08
   },
+  "trend_order_sizing": {
+    "market_capital": {
+      "CN": 500000,
+      "HK": 200000,
+      "US": 50000
+    },
+    "lot_size_by_market": {
+      "CN": 100,
+      "HK": 100,
+      "US": 1
+    },
+    "lot_size_by_ticker": {
+      "00700.HK": 100
+    },
+    "currency_by_market": {
+      "CN": "CNY",
+      "HK": "HKD",
+      "US": "USD"
+    }
+  },
   "trend_precompute": {
     "enabled": true,
     "warm_on_startup": true,

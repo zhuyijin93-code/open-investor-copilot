@@ -270,6 +270,30 @@ class BotServiceTests(unittest.TestCase):
             cached = bot_service.load_precomputed_reply("trend", "全市场", top_n=5)
         self.assertIsNone(cached)
 
+    def test_load_precomputed_reply_ignores_config_signature_mismatch(self) -> None:
+        path = self.cache_root / "plan_all_top5.json"
+        path.write_text(
+            '{"schema_version": 2, "config_signature": "old", "generated_at": "2026-06-26T00:00:00+00:00", "reply": "old"}',
+            encoding="utf-8",
+        )
+        with (
+            mock.patch("quant_wechat_bot.bot_service.TREND_CACHE_ROOT", self.cache_root),
+            mock.patch(
+                "quant_wechat_bot.bot_service.load_trend_precompute_config",
+                return_value=bot_service.TrendPrecomputeConfig(
+                    enabled=True,
+                    warm_on_startup=True,
+                    markets=("全市场",),
+                    top_n_values=(5,),
+                    backtest_months=(12,),
+                    max_age_minutes=1440,
+                ),
+            ),
+            mock.patch("quant_wechat_bot.bot_service.trend_cache_signature", return_value="new"),
+        ):
+            cached = bot_service.load_precomputed_reply("plan", "全市场", top_n=5)
+        self.assertIsNone(cached)
+
     def test_export_trading_plan_csv_file_resolves_relative_output(self) -> None:
         with mock.patch(
             "quant_wechat_bot.bot_service.trend_strategy.export_trading_plan_csv",

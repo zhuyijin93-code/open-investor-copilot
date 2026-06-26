@@ -458,6 +458,20 @@ def trend_cache_path(kind: str, market: str, *, top_n: int, months: int | None =
     return TREND_CACHE_ROOT / f"backtest_{market_key}_m{months or 0}_top{top_n}.json"
 
 
+def trend_cache_signature(kind: str) -> str:
+    settings = load_local_settings()
+    if not isinstance(settings, dict):
+        settings = {}
+    keys = ["trend_portfolio_constraints", "trend_exit_rules", "trend_execution"]
+    if kind == "backtest":
+        keys.append("trend_backtest_costs")
+    if kind == "plan":
+        keys.append("trend_order_sizing")
+    payload = {key: settings.get(key) for key in keys}
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha1(encoded.encode("utf-8")).hexdigest()
+
+
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -470,6 +484,7 @@ def save_precomputed_reply(kind: str, market: str, text: str, *, top_n: int, mon
     path = trend_cache_path(kind, market, top_n=top_n, months=months)
     payload = {
         "schema_version": TREND_CACHE_SCHEMA_VERSION,
+        "config_signature": trend_cache_signature(kind),
         "kind": kind,
         "market": display_market_label(market),
         "market_key": normalize_market(market),
@@ -498,6 +513,8 @@ def load_precomputed_reply(
     except (OSError, json.JSONDecodeError):
         return None
     if int(payload.get("schema_version") or 0) != TREND_CACHE_SCHEMA_VERSION:
+        return None
+    if str(payload.get("config_signature") or "") != trend_cache_signature(kind):
         return None
     text = payload.get("reply")
     raw_generated_at = payload.get("generated_at")

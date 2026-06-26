@@ -103,6 +103,7 @@ class TrendSnapshot:
     constraints: PortfolioConstraints
     exit_rules: TrendExitRules
     execution_rules: TrendExecutionRules
+    order_sizing_rules: OrderSizingRules
     market_exposures: tuple[MarketExposure, ...]
     constraint_diagnostics: ConstraintDiagnostics
     previous_rebalance_date: dt.date | None
@@ -168,6 +169,14 @@ class TrendExecutionRules:
 
 
 @dataclasses.dataclass(frozen=True)
+class OrderSizingRules:
+    market_capital: dict[str, float]
+    lot_size_by_market: dict[str, int]
+    lot_size_by_ticker: dict[str, int]
+    currency_by_market: dict[str, str]
+
+
+@dataclasses.dataclass(frozen=True)
 class ConstraintDiagnostics:
     skipped_sector_position_limit: int = 0
     skipped_sector_weight_limit: int = 0
@@ -195,6 +204,10 @@ class ExecutionInstruction:
     trigger_price: float | None
     stop_price: float | None
     risk_budget_pct: float
+    budget_value: float | None
+    currency: str | None
+    estimated_quantity: int | None
+    estimated_lots: int | None
     note: str
 
 
@@ -487,6 +500,42 @@ def load_execution_rules() -> TrendExecutionRules:
     )
 
 
+def load_order_sizing_rules() -> OrderSizingRules:
+    settings = market_close_digest.load_settings()
+    payload = settings.get("trend_order_sizing")
+    market_capital: dict[str, float] = {}
+    lot_size_by_market = {"CN": 100, "HK": 100, "US": 1}
+    lot_size_by_ticker: dict[str, int] = {}
+    currency_by_market = {"CN": "CNY", "HK": "HKD", "US": "USD"}
+    if isinstance(payload, Mapping):
+        raw_market_capital = payload.get("market_capital")
+        if isinstance(raw_market_capital, Mapping):
+            for key, value in raw_market_capital.items():
+                if isinstance(key, str) and isinstance(value, (int, float)) and float(value) > 0:
+                    market_capital[key.strip().upper()] = float(value)
+        raw_lot_size_by_market = payload.get("lot_size_by_market")
+        if isinstance(raw_lot_size_by_market, Mapping):
+            for key, value in raw_lot_size_by_market.items():
+                if isinstance(key, str) and isinstance(value, int) and value > 0:
+                    lot_size_by_market[key.strip().upper()] = value
+        raw_lot_size_by_ticker = payload.get("lot_size_by_ticker")
+        if isinstance(raw_lot_size_by_ticker, Mapping):
+            for key, value in raw_lot_size_by_ticker.items():
+                if isinstance(key, str) and isinstance(value, int) and value > 0:
+                    lot_size_by_ticker[key.strip().upper()] = value
+        raw_currency_by_market = payload.get("currency_by_market")
+        if isinstance(raw_currency_by_market, Mapping):
+            for key, value in raw_currency_by_market.items():
+                if isinstance(key, str) and isinstance(value, str) and value.strip():
+                    currency_by_market[key.strip().upper()] = value.strip().upper()
+    return OrderSizingRules(
+        market_capital=market_capital,
+        lot_size_by_market=lot_size_by_market,
+        lot_size_by_ticker=lot_size_by_ticker,
+        currency_by_market=currency_by_market,
+    )
+
+
 def summarize_sector_exposures(picks: tuple[TrendPick, ...] | list[TrendPick]) -> tuple[SectorExposure, ...]:
     exposures: dict[str, SectorExposure] = {}
     for item in picks:
@@ -609,10 +658,19 @@ def format_execution_plan_item(item: ExecutionInstruction) -> str:
     price_label = "触发价" if item.action == "突破加仓" else "参考价"
     price_text = f"{price_label} {item.trigger_price:.2f}" if item.trigger_price is not None else "价格以盘中成交为准"
     stop_text = f"止损 {item.stop_price:.2f}" if item.stop_price is not None else "无固定止损价"
+    sizing_bits: list[str] = []
+    if item.budget_value is not None and item.currency is not None:
+        sizing_bits.append(f"预算 {item.currency} {item.budget_value:,.0f}")
+    if item.estimated_quantity is not None:
+        qty_text = f"约 {item.estimated_quantity} 股"
+        if item.estimated_lots is not None and item.estimated_lots > 0:
+            qty_text += f" ({item.estimated_lots} 手)"
+        sizing_bits.append(qty_text)
+    sizing_text = f" | {' | '.join(sizing_bits)}" if sizing_bits else ""
     return (
         f"- {item.action} {item.ticker} {item.name} | "
         f"{item.from_weight * 100:.0f}% -> {item.to_weight * 100:.0f}% | "
-        f"{price_text} | {stop_text} | 风险预算 {item.risk_budget_pct * 100:.1f}% | {item.note}"
+        f"{price_text} | {stop_text}{sizing_text} | 风险预算 {item.risk_budget_pct * 100:.1f}% | {item.note}"
     )
 
 
@@ -627,6 +685,10 @@ TRADE_PLAN_EXPORT_FIELDS = (
     "to_weight_pct",
     "reference_price",
     "stop_price",
+    "budget_value",
+    "currency",
+    "estimated_quantity",
+    "estimated_lots",
     "risk_budget_pct",
     "note",
 )
@@ -648,11 +710,28 @@ def execution_plan_rows(snapshot: TrendSnapshot) -> list[dict[str, str]]:
                 "to_weight_pct": f"{item.to_weight * 100:.2f}",
                 "reference_price": "" if item.trigger_price is None else f"{item.trigger_price:.2f}",
                 "stop_price": "" if item.stop_price is None else f"{item.stop_price:.2f}",
+                "budget_value": "" if item.budget_value is None else f"{item.budget_value:.2f}",
+                "currency": item.currency or "",
+                "estimated_quantity": "" if item.estimated_quantity is None else str(item.estimated_quantity),
+                "estimated_lots": "" if item.estimated_lots is None else str(item.estimated_lots),
                 "risk_budget_pct": f"{item.risk_budget_pct * 100:.2f}",
                 "note": item.note,
             }
         )
     return rows
+
+
+def order_sizing_summary(order_sizing_rules: OrderSizingRules) -> str | None:
+    if not order_sizing_rules.market_capital:
+        return None
+    parts = []
+    for code in ("CN", "HK", "US"):
+        capital = order_sizing_rules.market_capital.get(code)
+        if capital is None:
+            continue
+        currency = order_sizing_rules.currency_by_market.get(code, code)
+        parts.append(f"{UNIVERSE_CONFIGS[code].label} {currency} {capital:,.0f}")
+    return " | ".join(parts) if parts else None
 
 
 def cache_path_for_symbol(symbol: str) -> Path:
@@ -1077,6 +1156,7 @@ def build_trend_snapshot(
     active_constraints = constraints or load_portfolio_constraints(target_codes)
     exit_rules = load_exit_rules()
     execution_rules = load_execution_rules()
+    order_sizing_rules = load_order_sizing_rules()
     effective_as_of = as_of or dt.date.today()
     benchmark_histories, benchmark_failures = load_histories(
         [UNIVERSE_CONFIGS[code].benchmark_symbol for code in target_codes],
@@ -1140,6 +1220,8 @@ def build_trend_snapshot(
         effective_as_of,
         exit_rules,
         execution_rules,
+        active_constraints,
+        order_sizing_rules,
     )
     invested_weight = round(sum(item.weight for item in picks), 4)
     return TrendSnapshot(
@@ -1154,6 +1236,7 @@ def build_trend_snapshot(
         constraints=active_constraints,
         exit_rules=exit_rules,
         execution_rules=execution_rules,
+        order_sizing_rules=order_sizing_rules,
         market_exposures=summarize_market_exposures(picks, active_constraints),
         constraint_diagnostics=constraint_diagnostics,
         previous_rebalance_date=previous_date,
@@ -1219,6 +1302,45 @@ def tranche_weights(delta_weight: float, execution_rules: TrendExecutionRules) -
         starter_weight = round(delta_weight, 4)
         add_on_weight = 0.0
     return starter_weight, add_on_weight
+
+
+def market_budget_reference_weight(code: str, constraints: PortfolioConstraints) -> float:
+    value = constraints.market_weight_budget.get(code)
+    if value is not None and value > 0:
+        return value
+    if len(constraints.market_weight_budget) <= 1:
+        return 1.0
+    return 0.0
+
+
+def order_budget_metrics(
+    ticker: str,
+    delta_weight: float,
+    reference_price: float | None,
+    constraints: PortfolioConstraints,
+    order_sizing_rules: OrderSizingRules,
+) -> tuple[float | None, str | None, int | None, int | None]:
+    market_code = infer_market_code(ticker)
+    capital = order_sizing_rules.market_capital.get(market_code)
+    if capital is None or capital <= 0:
+        return None, None, None, None
+    reference_weight = market_budget_reference_weight(market_code, constraints)
+    if reference_weight <= 0:
+        return None, None, None, None
+    budget_value = capital * delta_weight / reference_weight
+    currency = order_sizing_rules.currency_by_market.get(market_code)
+    if reference_price in (None, 0):
+        return round(budget_value, 2), currency, None, None
+    lot_size = order_sizing_rules.lot_size_by_ticker.get(
+        ticker.strip().upper(),
+        order_sizing_rules.lot_size_by_market.get(market_code, 1),
+    )
+    raw_quantity = int(budget_value / reference_price)
+    if raw_quantity <= 0:
+        return round(budget_value, 2), currency, 0, 0 if lot_size > 1 else 0
+    rounded_quantity = (raw_quantity // lot_size) * lot_size if lot_size > 1 else raw_quantity
+    estimated_lots = rounded_quantity // lot_size if lot_size > 1 and rounded_quantity > 0 else None
+    return round(budget_value, 2), currency, rounded_quantity, estimated_lots
 
 
 def detect_exit_reason(
@@ -1465,6 +1587,8 @@ def build_execution_plan(
     as_of: dt.date,
     exit_rules: TrendExitRules,
     execution_rules: TrendExecutionRules,
+    constraints: PortfolioConstraints,
+    order_sizing_rules: OrderSizingRules,
 ) -> tuple[ExecutionInstruction, ...]:
     previous_map = {item.ticker: item for item in previous}
     current_map = {item.ticker: item for item in current}
@@ -1479,6 +1603,13 @@ def build_execution_plan(
         delta_weight = abs(item.to_weight - item.from_weight)
         if delta_weight <= 0:
             continue
+        budget_value, currency, estimated_quantity, estimated_lots = order_budget_metrics(
+            item.ticker,
+            delta_weight,
+            reference_price,
+            constraints,
+            order_sizing_rules,
+        )
         if item.action in {"卖出", "减仓"}:
             instructions.append(
                 ExecutionInstruction(
@@ -1490,6 +1621,10 @@ def build_execution_plan(
                     trigger_price=reference_price,
                     stop_price=None,
                     risk_budget_pct=0.0,
+                    budget_value=budget_value,
+                    currency=currency,
+                    estimated_quantity=estimated_quantity,
+                    estimated_lots=estimated_lots,
                     note="风控指令优先，次日开盘处理" if "止损" in item.reason or "Risk OFF" in item.reason else item.reason,
                 )
             )
@@ -1499,6 +1634,13 @@ def build_execution_plan(
         starter_weight, add_on_weight = tranche_weights(delta_weight, execution_rules)
         starter_to_weight = round(item.from_weight + starter_weight, 4)
         starter_risk = starter_weight * exit_rules.stop_loss_pct if stop_price is not None else 0.0
+        starter_budget_value, starter_currency, starter_quantity, starter_lots = order_budget_metrics(
+            item.ticker,
+            starter_weight,
+            reference_price,
+            constraints,
+            order_sizing_rules,
+        )
         instructions.append(
             ExecutionInstruction(
                 action="首仓买入" if item.action == "买入" else "首仓加仓",
@@ -1509,6 +1651,10 @@ def build_execution_plan(
                 trigger_price=reference_price,
                 stop_price=stop_price,
                 risk_budget_pct=starter_risk,
+                budget_value=starter_budget_value,
+                currency=starter_currency,
+                estimated_quantity=starter_quantity,
+                estimated_lots=starter_lots,
                 note="先打底仓，确认趋势延续后再补齐" if add_on_weight > 0 else "目标仓位一次到位",
             )
         )
@@ -1517,6 +1663,13 @@ def build_execution_plan(
         trigger_pct = dynamic_add_on_trigger_pct(current_item, execution_rules)
         add_on_trigger = round(current_item.close * (1.0 + trigger_pct), 2)
         add_on_risk = add_on_weight * exit_rules.stop_loss_pct if stop_price is not None else 0.0
+        add_on_budget_value, add_on_currency, add_on_quantity, add_on_lots = order_budget_metrics(
+            item.ticker,
+            add_on_weight,
+            add_on_trigger,
+            constraints,
+            order_sizing_rules,
+        )
         instructions.append(
             ExecutionInstruction(
                 action="突破加仓",
@@ -1527,6 +1680,10 @@ def build_execution_plan(
                 trigger_price=add_on_trigger,
                 stop_price=stop_price,
                 risk_budget_pct=add_on_risk,
+                budget_value=add_on_budget_value,
+                currency=add_on_currency,
+                estimated_quantity=add_on_quantity,
+                estimated_lots=add_on_lots,
                 note=f"若放量站上触发价，再补足剩余 {add_on_weight * 100:.0f}% 仓位",
             )
         )
@@ -1870,6 +2027,9 @@ def format_trend_snapshot(
             f"- 执行规则: {execution_rule_summary(snapshot.execution_rules)}",
         ]
     )
+    sizing_summary = order_sizing_summary(snapshot.order_sizing_rules)
+    if sizing_summary:
+        lines.append(f"- 资金换算: {sizing_summary}")
     if snapshot.history_failures:
         lines.append(f"- 历史数据抓取失败 {snapshot.history_failures} 个标的，已自动跳过")
     if snapshot.market_exposures:
@@ -1965,6 +2125,9 @@ def format_trading_plan_from_snapshot(snapshot: TrendSnapshot) -> str:
         f"退出规则: {exit_rule_summary(snapshot.exit_rules)}",
         f"执行规则: {execution_rule_summary(snapshot.execution_rules)}",
     ]
+    sizing_summary = order_sizing_summary(snapshot.order_sizing_rules)
+    if sizing_summary:
+        lines.append(f"资金换算: {sizing_summary}")
     if snapshot.previous_rebalance_date is not None:
         lines.append(f"模型基准: 对比 {snapshot.previous_rebalance_date.isoformat()} 调仓日")
     if immediate_actions:
@@ -1983,6 +2146,14 @@ def format_trading_plan_from_snapshot(snapshot: TrendSnapshot) -> str:
             lines.append(
                 f"- {item.ticker} {item.name} | 目标权重 {item.weight * 100:.0f}% | 现价 {item.close:.2f}{stop_text}"
             )
+    if not snapshot.order_sizing_rules.market_capital:
+        lines.extend(
+            [
+                "",
+                "资金换算提示:",
+                "- 还没配置 `trend_order_sizing.market_capital`，所以暂不显示预算金额和估算股数。",
+            ]
+        )
     if not snapshot.execution_plan:
         lines.extend(
             [
@@ -2072,6 +2243,9 @@ def format_backtest_report(
         f"- 退出规则: {exit_rule_summary(report.latest_snapshot.exit_rules)}",
         f"- 执行规则: {execution_rule_summary(report.latest_snapshot.execution_rules)}",
     ]
+    sizing_summary = order_sizing_summary(report.latest_snapshot.order_sizing_rules)
+    if sizing_summary:
+        lines.append(f"- 资金换算: {sizing_summary}")
     if report.history_failures:
         lines.append(f"- 历史数据抓取失败: {report.history_failures} 个标的已跳过")
     recent_periods = list(report.periods[-3:])

@@ -113,6 +113,17 @@ class MarketCloseDigestTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "context_token is likely expired"):
                 market_close_digest.send_wechat_message("digest", dry_run=False)
 
+    def test_load_settings_honors_quant_wechat_settings_env(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            settings_path = Path(temp_dir) / "settings.json"
+            settings_path.write_text(
+                '{"trend_order_sizing": {"market_capital": {"CN": 500000}}}',
+                encoding="utf-8",
+            )
+            with mock.patch.dict("os.environ", {"QUANT_WECHAT_SETTINGS": str(settings_path)}, clear=True):
+                settings = market_close_digest.load_settings()
+        self.assertEqual(settings["trend_order_sizing"]["market_capital"]["CN"], 500000)
+
 
 if __name__ == "__main__":
     unittest.main()

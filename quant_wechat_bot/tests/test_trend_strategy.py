@@ -185,6 +185,24 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(execution_rules.min_add_on_trigger_pct, 0.02)
         self.assertAlmostEqual(execution_rules.max_add_on_trigger_pct, 0.06)
 
+    def test_order_sizing_rules_can_be_overridden_from_settings(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.trend_strategy.market_close_digest.load_settings",
+            return_value={
+                "trend_order_sizing": {
+                    "market_capital": {"CN": 500000},
+                    "lot_size_by_market": {"CN": 100},
+                    "lot_size_by_ticker": {"00700.HK": 200},
+                    "currency_by_market": {"CN": "CNY"},
+                }
+            },
+        ):
+            order_sizing_rules = trend_strategy.load_order_sizing_rules()
+        self.assertEqual(order_sizing_rules.market_capital["CN"], 500000)
+        self.assertEqual(order_sizing_rules.lot_size_by_market["CN"], 100)
+        self.assertEqual(order_sizing_rules.lot_size_by_ticker["00700.HK"], 200)
+        self.assertEqual(order_sizing_rules.currency_by_market["CN"], "CNY")
+
     def test_build_trend_snapshot_enforces_sector_weight_cap(self) -> None:
         sector_path = Path(self.temp_dir.name) / "sector_cap.csv"
         write_universe_csv(
@@ -418,10 +436,25 @@ class TrendStrategyTests(unittest.TestCase):
                 min_add_on_trigger_pct=0.03,
                 max_add_on_trigger_pct=0.08,
             ),
+            trend_strategy.PortfolioConstraints(
+                max_position_weight=0.25,
+                max_sector_positions=2,
+                max_sector_weight=0.35,
+                target_gross_exposure=1.0,
+                market_weight_budget={"CN": 1.0},
+            ),
+            trend_strategy.OrderSizingRules(
+                market_capital={"CN": 500000},
+                lot_size_by_market={"CN": 100},
+                lot_size_by_ticker={},
+                currency_by_market={"CN": "CNY"},
+            ),
         )
         self.assertEqual(len(execution_plan), 2)
         self.assertEqual(execution_plan[0].action, "首仓买入")
         self.assertAlmostEqual(execution_plan[0].to_weight, 0.15, places=4)
+        self.assertEqual(execution_plan[0].currency, "CNY")
+        self.assertEqual(execution_plan[0].estimated_quantity, 700)
         self.assertEqual(execution_plan[1].action, "突破加仓")
         self.assertAlmostEqual(execution_plan[1].from_weight, 0.15, places=4)
         self.assertAlmostEqual(execution_plan[1].to_weight, 0.25, places=4)
@@ -451,6 +484,12 @@ class TrendStrategyTests(unittest.TestCase):
                 min_add_on_trigger_pct=0.03,
                 max_add_on_trigger_pct=0.08,
             ),
+            order_sizing_rules=trend_strategy.OrderSizingRules(
+                market_capital={"CN": 500000},
+                lot_size_by_market={"CN": 100},
+                lot_size_by_ticker={},
+                currency_by_market={"CN": "CNY"},
+            ),
             market_exposures=tuple(),
             constraint_diagnostics=trend_strategy.ConstraintDiagnostics(),
             previous_rebalance_date=dt.date(2024, 12, 1),
@@ -465,6 +504,10 @@ class TrendStrategyTests(unittest.TestCase):
                     trigger_price=100.0,
                     stop_price=88.0,
                     risk_budget_pct=0.018,
+                    budget_value=75000.0,
+                    currency="CNY",
+                    estimated_quantity=700,
+                    estimated_lots=7,
                     note="先打底仓",
                 ),
             ),
@@ -483,6 +526,7 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertIn("action", rows[0])
         self.assertIn("ticker", rows[0])
+        self.assertEqual(rows[0]["currency"], "CNY")
 
     def test_sector_exposure_summary_groups_weights(self) -> None:
         picks = (

@@ -4,6 +4,7 @@ import argparse
 import dataclasses
 import datetime as dt
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -212,6 +213,17 @@ def load_json(path: Path) -> Any:
 
 
 def load_settings() -> dict[str, Any]:
+    env_path = os.environ.get("QUANT_WECHAT_SETTINGS")
+    if env_path:
+        candidate = Path(env_path).expanduser()
+        if not candidate.exists():
+            return {}
+        try:
+            payload = load_json(candidate)
+        except json.JSONDecodeError:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
     merged: dict[str, Any] = {}
     for path in (ROOT_SETTINGS_PATH, SETTINGS_PATH):
         if not path.exists():
