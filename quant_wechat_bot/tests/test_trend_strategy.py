@@ -427,6 +427,63 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(execution_plan[1].to_weight, 0.25, places=4)
         self.assertGreater(execution_plan[1].trigger_price or 0, 100.0)
 
+    def test_export_trading_plan_csv_writes_rows(self) -> None:
+        output = Path(self.temp_dir.name) / "trade_plan.csv"
+        snapshot = trend_strategy.TrendSnapshot(
+            market_label="A股",
+            as_of=dt.date(2025, 1, 3),
+            candidate_count=3,
+            evaluated_count=2,
+            history_failures=0,
+            invested_weight=0.35,
+            cash_weight=0.65,
+            regimes=tuple(),
+            constraints=trend_strategy.PortfolioConstraints(
+                max_position_weight=0.25,
+                max_sector_positions=2,
+                max_sector_weight=0.35,
+                target_gross_exposure=1.0,
+                market_weight_budget={"CN": 1.0},
+            ),
+            exit_rules=trend_strategy.TrendExitRules(stop_loss_pct=0.12, trailing_stop_pct=0.15, trend_break_window=20),
+            execution_rules=trend_strategy.TrendExecutionRules(
+                entry_starter_fraction=0.6,
+                min_add_on_trigger_pct=0.03,
+                max_add_on_trigger_pct=0.08,
+            ),
+            market_exposures=tuple(),
+            constraint_diagnostics=trend_strategy.ConstraintDiagnostics(),
+            previous_rebalance_date=dt.date(2024, 12, 1),
+            trade_plan=tuple(),
+            execution_plan=(
+                trend_strategy.ExecutionInstruction(
+                    action="首仓买入",
+                    ticker="600519",
+                    name="Alpha",
+                    from_weight=0.0,
+                    to_weight=0.15,
+                    trigger_price=100.0,
+                    stop_price=88.0,
+                    risk_budget_pct=0.018,
+                    note="先打底仓",
+                ),
+            ),
+            picks=tuple(),
+        )
+        with mock.patch("quant_wechat_bot.trend_strategy.build_trend_snapshot", return_value=snapshot):
+            trend_strategy.export_trading_plan_csv(
+                self.universe_path,
+                "A股",
+                output,
+                top_n=2,
+                history_fetcher=self.histories.__getitem__,
+            )
+        with output.open("r", encoding="utf-8", newline="") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertTrue(rows)
+        self.assertIn("action", rows[0])
+        self.assertIn("ticker", rows[0])
+
     def test_sector_exposure_summary_groups_weights(self) -> None:
         picks = (
             trend_strategy.TrendPick("A", "A.SS", "A", "科技", "A股", 100, 1, 0.25, 0, 0, 0, 0, 0, 10),

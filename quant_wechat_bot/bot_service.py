@@ -134,6 +134,11 @@ def parse_args() -> argparse.Namespace:
         help="Backtest month variants to precompute. Defaults to the configured trend_precompute.backtest_months list.",
     )
 
+    export_parser = subparsers.add_parser("export-trade-plan", help="Export the next-day trade plan as CSV.")
+    export_parser.add_argument("--market", default=None, help="Market label, for example A股 / 港股 / 美股 / 全市场.")
+    export_parser.add_argument("--top-n", type=int, default=5, help="Target number of model holdings. Default: 5.")
+    export_parser.add_argument("--output", required=True, help="CSV output path.")
+
     return parser.parse_args()
 
 
@@ -163,6 +168,7 @@ def help_text() -> str:
         18. 收盘总结 美股
         19. 趋势选股 A股
         20. 趋势回测 A股 12
+        21. 交易计划 A股
 
         Slash commands:
         - /help
@@ -173,6 +179,7 @@ def help_text() -> str:
         - /close [market]
         - /trend [market] [top_n]
         - /backtest [market] [months]
+        - /plan [market] [top_n]
 
         提醒:
         - `样本池` 是仓库自带的小样本
@@ -446,8 +453,8 @@ def load_trend_precompute_config() -> TrendPrecomputeConfig:
 
 def trend_cache_path(kind: str, market: str, *, top_n: int, months: int | None = None) -> Path:
     market_key = normalize_market(market)
-    if kind == "trend":
-        return TREND_CACHE_ROOT / f"trend_{market_key}_top{top_n}.json"
+    if kind in {"trend", "plan"}:
+        return TREND_CACHE_ROOT / f"{kind}_{market_key}_top{top_n}.json"
     return TREND_CACHE_ROOT / f"backtest_{market_key}_m{months or 0}_top{top_n}.json"
 
 
@@ -531,6 +538,17 @@ def render_trend_snapshot_text(market: str | None = None, top_n: int = 5) -> str
     )
 
 
+def render_trading_plan_text(market: str | None = None, top_n: int = 5) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return truncate_reply(
+        trend_strategy.format_trading_plan(
+            resolve_trend_universe_path(effective_market),
+            effective_market,
+            top_n=top_n,
+        )
+    )
+
+
 def render_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
     return truncate_reply(
@@ -571,6 +589,12 @@ def precompute_waiting_text(kind: str, market: str, *, top_n: int, months: int |
             f"稍后重试 `趋势选股 {display_market_label(market)} {top_n}`，"
             "或先看 `趋势选股 A股 2` / `趋势选股 美股 2`。"
         )
+    if kind == "plan":
+        return (
+            f"{display_market_label(market)} 交易计划缓存正在预热，预计几十秒内完成。\n\n"
+            f"稍后重试 `交易计划 {display_market_label(market)} {top_n}`，"
+            "或先看 `趋势选股 A股 2`。"
+        )
     return (
         f"{display_market_label(market)} 趋势回测缓存正在预热，预计 1-2 分钟内完成。\n\n"
         f"稍后重试 `趋势回测 {display_market_label(market)} {months or 12}`，"
@@ -597,6 +621,11 @@ def precompute_trend_outputs(
                 generated.append(save_precomputed_reply("trend", market, reply, top_n=top_n))
             except Exception as exc:
                 errors.append(f"趋势选股 {market} {top_n}: {exc}")
+            try:
+                reply = render_trading_plan_text(market, top_n=top_n)
+                generated.append(save_precomputed_reply("plan", market, reply, top_n=top_n))
+            except Exception as exc:
+                errors.append(f"交易计划 {market} {top_n}: {exc}")
         for months in selected_backtest_months:
             try:
                 reply = render_backtest_report_text(market, months=months)
@@ -693,6 +722,12 @@ def resolve_trend_universe_path(market: str | None = None) -> Path:
     return resolve_universe_path(effective_market)
 
 
+def default_trade_plan_export_path(market: str | None = None, top_n: int = 5) -> Path:
+    effective_market = display_market_label(market if market is not None else resolve_default_market())
+    market_key = normalize_market(effective_market)
+    return PROJECT_ROOT / ".cache" / f"trade_plan_{market_key}_top{top_n}.csv"
+
+
 def build_trend_snapshot_text(market: str | None = None, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
     cached = load_precomputed_reply("trend", effective_market, top_n=top_n)
@@ -708,6 +743,24 @@ def build_trend_snapshot_text(market: str | None = None, top_n: int = 5) -> str:
     reply = render_trend_snapshot_text(effective_market, top_n=top_n)
     if should_precompute_request("trend", effective_market, top_n=top_n):
         save_precomputed_reply("trend", effective_market, reply, top_n=top_n)
+    return reply
+
+
+def build_trading_plan_text(market: str | None = None, top_n: int = 5) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    cached = load_precomputed_reply("plan", effective_market, top_n=top_n)
+    if cached is not None:
+        return cached.text
+    stale = load_precomputed_reply("plan", effective_market, top_n=top_n, allow_stale=True)
+    if stale is not None and should_defer_to_precompute("plan", effective_market, top_n=top_n):
+        start_background_trend_precompute()
+        return format_stale_cache_notice(stale)
+    if should_defer_to_precompute("plan", effective_market, top_n=top_n):
+        start_background_trend_precompute()
+        return precompute_waiting_text("plan", effective_market, top_n=top_n)
+    reply = render_trading_plan_text(effective_market, top_n=top_n)
+    if should_precompute_request("plan", effective_market, top_n=top_n):
+        save_precomputed_reply("plan", effective_market, reply, top_n=top_n)
     return reply
 
 
@@ -727,6 +780,19 @@ def build_backtest_report_text(market: str | None = None, months: int = 12, top_
     if should_precompute_request("backtest", effective_market, top_n=top_n, months=months):
         save_precomputed_reply("backtest", effective_market, reply, top_n=top_n, months=months)
     return reply
+
+
+def export_trading_plan_csv_file(market: str | None = None, top_n: int = 5, output_path: str | None = None) -> Path:
+    effective_market = market if market is not None else resolve_default_market()
+    output = Path(output_path).expanduser() if output_path else default_trade_plan_export_path(effective_market, top_n=top_n)
+    if not output.is_absolute():
+        output = PROJECT_ROOT / output
+    return trend_strategy.export_trading_plan_csv(
+        resolve_trend_universe_path(effective_market),
+        effective_market,
+        output,
+        top_n=top_n,
+    )
 
 
 def dispatch_message(message: str) -> BotReply:
@@ -760,6 +826,11 @@ def dispatch_message(message: str) -> BotReply:
         months = int(backtest_match.group(2) or "12")
         return BotReply(build_backtest_report_text(backtest_match.group(1), months=months), "backtest")
 
+    plan_match = re.match(r"^(?:/plan|交易计划|执行计划|调仓计划)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
+    if plan_match:
+        top_n = int(plan_match.group(2) or "5")
+        return BotReply(build_trading_plan_text(plan_match.group(1), top_n=top_n), "plan")
+
     pick_match = re.match(r"^/(?:pick)\s+([^\s]+)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
     if pick_match:
         top_n = int(pick_match.group(3) or "5")
@@ -792,7 +863,7 @@ def dispatch_message(message: str) -> BotReply:
         return BotReply(build_screen_text("defensive"), "pick")
 
     return BotReply(
-        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
+        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 交易计划 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
         "help",
     )
 
@@ -1928,6 +1999,10 @@ def main() -> int:
             for error in errors:
                 print(f"ERROR: {error}")
             return 1
+        return 0
+    if args.command == "export-trade-plan":
+        path = export_trading_plan_csv_file(args.market, top_n=args.top_n, output_path=args.output)
+        print(path)
         return 0
     if args.command == "serve":
         return run_server(args.host, args.port)

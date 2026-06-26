@@ -124,6 +124,16 @@ class BotServiceTests(unittest.TestCase):
         self.assertEqual(reply.command, "backtest")
         self.assertEqual(reply.text, "backtest output")
 
+    def test_plan_routes_to_trading_plan(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.build_trading_plan_text",
+            return_value="plan output",
+        ) as build_plan:
+            reply = bot_service.handle_message("交易计划 A股 6")
+        build_plan.assert_called_once_with("A股", top_n=6)
+        self.assertEqual(reply.command, "plan")
+        self.assertEqual(reply.text, "plan output")
+
     def test_default_market_is_used_when_configured(self) -> None:
         with (
             mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={"default_market": "A股"}),
@@ -259,6 +269,15 @@ class BotServiceTests(unittest.TestCase):
         ):
             cached = bot_service.load_precomputed_reply("trend", "全市场", top_n=5)
         self.assertIsNone(cached)
+
+    def test_export_trading_plan_csv_file_resolves_relative_output(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.trend_strategy.export_trading_plan_csv",
+            return_value=PROJECT_ROOT / ".cache" / "plan.csv",
+        ) as export_plan:
+            path = bot_service.export_trading_plan_csv_file("A股", top_n=3, output_path=".cache/plan.csv")
+        self.assertEqual(path, PROJECT_ROOT / ".cache" / "plan.csv")
+        export_plan.assert_called_once()
 
     def test_verify_wechat_signature(self) -> None:
         signature = bot_service.wechat_signature("token123", "1718000000", "nonce456")

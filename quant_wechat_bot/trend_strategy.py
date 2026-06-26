@@ -616,6 +616,45 @@ def format_execution_plan_item(item: ExecutionInstruction) -> str:
     )
 
 
+TRADE_PLAN_EXPORT_FIELDS = (
+    "generated_at",
+    "market",
+    "as_of",
+    "action",
+    "ticker",
+    "name",
+    "from_weight_pct",
+    "to_weight_pct",
+    "reference_price",
+    "stop_price",
+    "risk_budget_pct",
+    "note",
+)
+
+
+def execution_plan_rows(snapshot: TrendSnapshot) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    generated_at = dt.datetime.now().isoformat(timespec="seconds")
+    for item in snapshot.execution_plan:
+        rows.append(
+            {
+                "generated_at": generated_at,
+                "market": snapshot.market_label,
+                "as_of": snapshot.as_of.isoformat(),
+                "action": item.action,
+                "ticker": item.ticker,
+                "name": item.name,
+                "from_weight_pct": f"{item.from_weight * 100:.2f}",
+                "to_weight_pct": f"{item.to_weight * 100:.2f}",
+                "reference_price": "" if item.trigger_price is None else f"{item.trigger_price:.2f}",
+                "stop_price": "" if item.stop_price is None else f"{item.stop_price:.2f}",
+                "risk_budget_pct": f"{item.risk_budget_pct * 100:.2f}",
+                "note": item.note,
+            }
+        )
+    return rows
+
+
 def cache_path_for_symbol(symbol: str) -> Path:
     safe_symbol = re.sub(r"[^A-Z0-9._-]+", "_", symbol.strip().upper())
     return HISTORY_CACHE_ROOT / f"{safe_symbol}.csv"
@@ -1910,6 +1949,87 @@ def format_trend_snapshot(
         ]
     )
     return "\n".join(lines)
+
+
+def format_trading_plan_from_snapshot(snapshot: TrendSnapshot) -> str:
+    immediate_actions = [item for item in snapshot.execution_plan if item.action.startswith("立即")]
+    staged_entries = [item for item in snapshot.execution_plan if not item.action.startswith("立即")]
+    lines = [
+        "Quant WeChat Bot",
+        "",
+        "策略: 次日交易计划",
+        f"市场: {snapshot.market_label}",
+        f"日期: {snapshot.as_of.isoformat()}",
+        f"市场风控: {' / '.join(f'{item.market_label} ' + ('Risk ON' if item.risk_on else 'Risk OFF') for item in snapshot.regimes) if snapshot.regimes else '未知'}",
+        f"目标持仓: {snapshot.constraints.target_gross_exposure * 100:.0f}% | 实际持仓: {snapshot.invested_weight * 100:.0f}% | 现金 {snapshot.cash_weight * 100:.0f}%",
+        f"退出规则: {exit_rule_summary(snapshot.exit_rules)}",
+        f"执行规则: {execution_rule_summary(snapshot.execution_rules)}",
+    ]
+    if snapshot.previous_rebalance_date is not None:
+        lines.append(f"模型基准: 对比 {snapshot.previous_rebalance_date.isoformat()} 调仓日")
+    if immediate_actions:
+        lines.extend(["", "开盘先做"])
+        for item in immediate_actions:
+            lines.append(format_execution_plan_item(item))
+    if staged_entries:
+        lines.extend(["", "盘中条件单"])
+        for item in staged_entries:
+            lines.append(format_execution_plan_item(item))
+    if snapshot.picks:
+        lines.extend(["", "模型目标仓"])
+        for item in snapshot.picks:
+            stop_price = stop_price_from_entry(item.close, snapshot.exit_rules)
+            stop_text = f" | 止损 {stop_price:.2f}" if stop_price is not None else ""
+            lines.append(
+                f"- {item.ticker} {item.name} | 目标权重 {item.weight * 100:.0f}% | 现价 {item.close:.2f}{stop_text}"
+            )
+    if not snapshot.execution_plan:
+        lines.extend(
+            [
+                "",
+                "当前无新增执行动作。",
+                "如果你已经按模型持仓运行，今天更像是持仓观察日。",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "执行提醒:",
+            "- 先处理风控卖单，再处理新开仓和加仓。",
+            "- 突破加仓只在价格有效站上触发价时执行，没触发就保留底仓。",
+            "- 单票风险预算按目标权重和止损线估算，不含隔夜跳空。",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_trading_plan(
+    universe_path: str | Path,
+    market: str | None,
+    *,
+    top_n: int = DEFAULT_TOP_N,
+    history_fetcher: HistoryFetcher | None = None,
+) -> str:
+    snapshot = build_trend_snapshot(universe_path, market, top_n=top_n, history_fetcher=history_fetcher)
+    return format_trading_plan_from_snapshot(snapshot)
+
+
+def export_trading_plan_csv(
+    universe_path: str | Path,
+    market: str | None,
+    output_path: str | Path,
+    *,
+    top_n: int = DEFAULT_TOP_N,
+    history_fetcher: HistoryFetcher | None = None,
+) -> Path:
+    snapshot = build_trend_snapshot(universe_path, market, top_n=top_n, history_fetcher=history_fetcher)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TRADE_PLAN_EXPORT_FIELDS)
+        writer.writeheader()
+        writer.writerows(execution_plan_rows(snapshot))
+    return output
 
 
 def format_backtest_report(
