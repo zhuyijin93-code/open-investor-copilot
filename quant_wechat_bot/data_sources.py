@@ -188,6 +188,7 @@ def _fetch_market_rows(
     rows: list[dict[str, str]] = []
     total = None
     page = 1
+    fetched_raw_items = 0
     target_limit = limit if limit and limit > 0 else None
     while target_limit is None or len(rows) < target_limit:
         payload = _fetch_eastmoney_page(page, EASTMONEY_PAGE_SIZE, fs)
@@ -196,6 +197,7 @@ def _fetch_market_rows(
         items = data.get("diff") or []
         if not items:
             break
+        fetched_raw_items += len(items)
         for item in items:
             if not validator(item, min_amount):
                 continue
@@ -205,7 +207,7 @@ def _fetch_market_rows(
             rows.append(row)
             if target_limit is not None and len(rows) >= target_limit:
                 break
-        if total and page * EASTMONEY_PAGE_SIZE >= total:
+        if total and fetched_raw_items >= total:
             break
         page += 1
     return rows
