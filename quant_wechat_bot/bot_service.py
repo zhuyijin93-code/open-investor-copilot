@@ -206,7 +206,7 @@ def resolve_universe_path(market: str | None = None) -> Path:
             max_age_seconds=max_age_seconds,
         )
     if normalized_market in {"all", "global"}:
-        candidate = resolve_configured_path(settings, "global_universe_csv", "global_universe.v3.csv")
+        candidate = resolve_configured_path(settings, "global_universe_csv", "global_universe.v4.csv")
         a_share_path = resolve_configured_path(settings, "a_share_universe_csv", "a_share_universe.csv")
         hk_share_path = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.v3.csv")
         us_share_path = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.v3.csv")
