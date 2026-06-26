@@ -658,15 +658,8 @@ def format_execution_plan_item(item: ExecutionInstruction) -> str:
     price_label = "触发价" if item.action == "突破加仓" else "参考价"
     price_text = f"{price_label} {item.trigger_price:.2f}" if item.trigger_price is not None else "价格以盘中成交为准"
     stop_text = f"止损 {item.stop_price:.2f}" if item.stop_price is not None else "无固定止损价"
-    sizing_bits: list[str] = []
-    if item.budget_value is not None and item.currency is not None:
-        sizing_bits.append(f"预算 {item.currency} {item.budget_value:,.0f}")
-    if item.estimated_quantity is not None:
-        qty_text = f"约 {item.estimated_quantity} 股"
-        if item.estimated_lots is not None and item.estimated_lots > 0:
-            qty_text += f" ({item.estimated_lots} 手)"
-        sizing_bits.append(qty_text)
-    sizing_text = f" | {' | '.join(sizing_bits)}" if sizing_bits else ""
+    sizing_text_value = execution_order_sizing_text(item)
+    sizing_text = f" | {sizing_text_value}" if sizing_text_value else ""
     return (
         f"- {item.action} {item.ticker} {item.name} | "
         f"{item.from_weight * 100:.0f}% -> {item.to_weight * 100:.0f}% | "
@@ -732,6 +725,27 @@ def order_sizing_summary(order_sizing_rules: OrderSizingRules) -> str | None:
         currency = order_sizing_rules.currency_by_market.get(code, code)
         parts.append(f"{UNIVERSE_CONFIGS[code].label} {currency} {capital:,.0f}")
     return " | ".join(parts) if parts else None
+
+
+def execution_order_sizing_text(item: ExecutionInstruction) -> str | None:
+    bits: list[str] = []
+    if item.budget_value is not None and item.currency is not None:
+        bits.append(f"预算 {item.currency} {item.budget_value:,.0f}")
+    if item.estimated_quantity is not None:
+        if item.estimated_quantity <= 0:
+            bits.append("不足 1 手" if item.estimated_lots == 0 else "不足 1 股")
+        else:
+            qty_text = f"约 {item.estimated_quantity} 股"
+            if item.estimated_lots is not None and item.estimated_lots > 0:
+                qty_text += f" ({item.estimated_lots} 手)"
+            bits.append(qty_text)
+    return " | ".join(bits) if bits else None
+
+
+def snapshot_session_date(snapshot: TrendSnapshot) -> dt.date:
+    if snapshot.regimes:
+        return max(item.as_of for item in snapshot.regimes)
+    return snapshot.as_of
 
 
 def cache_path_for_symbol(symbol: str) -> Path:
@@ -1339,7 +1353,9 @@ def order_budget_metrics(
     if raw_quantity <= 0:
         return round(budget_value, 2), currency, 0, 0 if lot_size > 1 else 0
     rounded_quantity = (raw_quantity // lot_size) * lot_size if lot_size > 1 else raw_quantity
-    estimated_lots = rounded_quantity // lot_size if lot_size > 1 and rounded_quantity > 0 else None
+    estimated_lots = 0 if lot_size > 1 and rounded_quantity <= 0 else None
+    if lot_size > 1 and rounded_quantity > 0:
+        estimated_lots = rounded_quantity // lot_size
     return round(budget_value, 2), currency, rounded_quantity, estimated_lots
 
 
@@ -2174,6 +2190,100 @@ def format_trading_plan_from_snapshot(snapshot: TrendSnapshot) -> str:
     return "\n".join(lines)
 
 
+def format_recommendation_digest_from_snapshot(snapshot: TrendSnapshot) -> str:
+    session_date = snapshot_session_date(snapshot)
+    risk_text = (
+        " / ".join(
+            f"{item.market_label} " + ("Risk ON" if item.risk_on else "Risk OFF")
+            for item in snapshot.regimes
+        )
+        if snapshot.regimes
+        else "未知"
+    )
+    entry_actions = [
+        item
+        for item in snapshot.execution_plan
+        if item.action in {"首仓买入", "首仓加仓"}
+    ]
+    breakout_actions = {
+        item.ticker: item
+        for item in snapshot.execution_plan
+        if item.action == "突破加仓"
+    }
+    exit_actions = [item for item in snapshot.execution_plan if item.action.startswith("立即")]
+    picks_by_ticker = {item.ticker: item for item in snapshot.picks}
+    lines = [
+        f"【{snapshot.market_label}推荐日报｜{session_date.isoformat()}】",
+        f"市场风控: {risk_text}",
+        f"建议仓位: 持仓 {snapshot.invested_weight * 100:.0f}% | 现金 {snapshot.cash_weight * 100:.0f}%",
+    ]
+    if len(snapshot.market_exposures) > 1:
+        allocations = " | ".join(
+            f"{item.market_label} {item.actual_weight * 100:.0f}%"
+            for item in snapshot.market_exposures
+            if item.actual_weight > 0
+        )
+        if allocations:
+            lines.append(f"市场分配: {allocations}")
+    if entry_actions:
+        lines.extend(["", "今日优先关注"])
+        for index, item in enumerate(entry_actions[:3], start=1):
+            pick = picks_by_ticker.get(item.ticker)
+            breakout = breakout_actions.get(item.ticker)
+            target_weight = pick.weight if pick is not None else (breakout.to_weight if breakout is not None else item.to_weight)
+            starter_weight = max(0.0, item.to_weight - item.from_weight)
+            header = f"{index}. {item.ticker} {item.name} | 目标 {target_weight * 100:.0f}%"
+            if pick is not None:
+                header += f" | 分数 {pick.score:.1f}"
+            lines.append(header)
+            market_bits = []
+            if pick is not None:
+                market_bits.append(f"{pick.market_label}/{pick.sector}")
+                market_bits.append(f"现价 {pick.close:.2f}")
+                market_bits.append(f"20D {pick.ret20:+.1f}%")
+                market_bits.append(f"60D {pick.ret60:+.1f}%")
+            elif item.trigger_price is not None:
+                market_bits.append(f"参考价 {item.trigger_price:.2f}")
+            if item.stop_price is not None:
+                market_bits.append(f"止损 {item.stop_price:.2f}")
+            if market_bits:
+                lines.append("   " + " | ".join(market_bits))
+            action_bits = [f"首仓 {starter_weight * 100:.0f}%"]
+            if breakout is not None and breakout.trigger_price is not None:
+                add_on_weight = max(0.0, breakout.to_weight - breakout.from_weight)
+                action_bits.append(f"突破 {breakout.trigger_price:.2f} 再加 {add_on_weight * 100:.0f}%")
+            sizing_text = execution_order_sizing_text(item)
+            if sizing_text:
+                action_bits.append(sizing_text)
+            lines.append("   " + " | ".join(action_bits))
+    elif snapshot.picks:
+        lines.extend(["", "当前核心持仓"])
+        for index, item in enumerate(snapshot.picks[:3], start=1):
+            lines.append(
+                f"{index}. {item.ticker} {item.name} | 目标 {item.weight * 100:.0f}% | 分数 {item.score:.1f}"
+            )
+            lines.append(
+                f"   {item.market_label}/{item.sector} | 现价 {item.close:.2f} | 20D {item.ret20:+.1f}% | 60D {item.ret60:+.1f}%"
+            )
+    else:
+        lines.extend(
+            [
+                "",
+                "当前没有新的趋势开仓推荐。",
+                "模型更偏防守，继续等市场 Risk ON 或更强的趋势结构出现。",
+            ]
+        )
+    if exit_actions:
+        lines.extend(["", "先处理风控"])
+        for item in exit_actions[:3]:
+            lines.append(f"- {item.action} {item.ticker} {item.name} | {item.note}")
+    if not snapshot.order_sizing_rules.market_capital:
+        lines.extend(["", "提示: 还没配置资金桶，当前只输出权重，不输出预算金额和估算股数。"])
+    lines.append("")
+    lines.append("仅供模型跟踪参考，不构成投资建议。")
+    return "\n".join(lines)
+
+
 def format_trading_plan(
     universe_path: str | Path,
     market: str | None,
@@ -2183,6 +2293,17 @@ def format_trading_plan(
 ) -> str:
     snapshot = build_trend_snapshot(universe_path, market, top_n=top_n, history_fetcher=history_fetcher)
     return format_trading_plan_from_snapshot(snapshot)
+
+
+def format_recommendation_digest(
+    universe_path: str | Path,
+    market: str | None,
+    *,
+    top_n: int = DEFAULT_TOP_N,
+    history_fetcher: HistoryFetcher | None = None,
+) -> str:
+    snapshot = build_trend_snapshot(universe_path, market, top_n=top_n, history_fetcher=history_fetcher)
+    return format_recommendation_digest_from_snapshot(snapshot)
 
 
 def export_trading_plan_csv(

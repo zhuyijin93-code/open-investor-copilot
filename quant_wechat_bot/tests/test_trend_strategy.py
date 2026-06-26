@@ -528,6 +528,133 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertIn("ticker", rows[0])
         self.assertEqual(rows[0]["currency"], "CNY")
 
+    def test_execution_order_sizing_text_uses_sub_lot_hint(self) -> None:
+        item = trend_strategy.ExecutionInstruction(
+            action="首仓买入",
+            ticker="603986",
+            name="兆易创新",
+            from_weight=0.0,
+            to_weight=0.15,
+            trigger_price=768.93,
+            stop_price=676.66,
+            risk_budget_pct=0.018,
+            budget_value=75000.0,
+            currency="CNY",
+            estimated_quantity=0,
+            estimated_lots=0,
+            note="先打底仓",
+        )
+        self.assertEqual(
+            trend_strategy.execution_order_sizing_text(item),
+            "预算 CNY 75,000 | 不足 1 手",
+        )
+
+    def test_format_recommendation_digest_from_snapshot_includes_priority_entries(self) -> None:
+        snapshot = trend_strategy.TrendSnapshot(
+            market_label="A股",
+            as_of=dt.date(2025, 1, 3),
+            candidate_count=3,
+            evaluated_count=2,
+            history_failures=0,
+            invested_weight=0.35,
+            cash_weight=0.65,
+            regimes=(
+                trend_strategy.RegimeSnapshot(
+                    market_code="CN",
+                    market_label="A股",
+                    benchmark_symbol="000300.SS",
+                    benchmark_name="沪深300",
+                    as_of=dt.date(2025, 1, 3),
+                    close=100.0,
+                    ma20=98.0,
+                    ma60=95.0,
+                    ma120=90.0,
+                    ret60=12.0,
+                    risk_on=True,
+                    signals_on=3,
+                ),
+            ),
+            constraints=trend_strategy.PortfolioConstraints(
+                max_position_weight=0.25,
+                max_sector_positions=2,
+                max_sector_weight=0.35,
+                target_gross_exposure=1.0,
+                market_weight_budget={"CN": 1.0},
+            ),
+            exit_rules=trend_strategy.TrendExitRules(stop_loss_pct=0.12, trailing_stop_pct=0.15, trend_break_window=20),
+            execution_rules=trend_strategy.TrendExecutionRules(
+                entry_starter_fraction=0.6,
+                min_add_on_trigger_pct=0.03,
+                max_add_on_trigger_pct=0.08,
+            ),
+            order_sizing_rules=trend_strategy.OrderSizingRules(
+                market_capital={"CN": 500000},
+                lot_size_by_market={"CN": 100},
+                lot_size_by_ticker={},
+                currency_by_market={"CN": "CNY"},
+            ),
+            market_exposures=tuple(),
+            constraint_diagnostics=trend_strategy.ConstraintDiagnostics(),
+            previous_rebalance_date=dt.date(2024, 12, 1),
+            trade_plan=tuple(),
+            execution_plan=(
+                trend_strategy.ExecutionInstruction(
+                    action="首仓买入",
+                    ticker="603986",
+                    name="兆易创新",
+                    from_weight=0.0,
+                    to_weight=0.15,
+                    trigger_price=768.93,
+                    stop_price=676.66,
+                    risk_budget_pct=0.018,
+                    budget_value=75000.0,
+                    currency="CNY",
+                    estimated_quantity=0,
+                    estimated_lots=0,
+                    note="先打底仓",
+                ),
+                trend_strategy.ExecutionInstruction(
+                    action="突破加仓",
+                    ticker="603986",
+                    name="兆易创新",
+                    from_weight=0.15,
+                    to_weight=0.25,
+                    trigger_price=830.44,
+                    stop_price=676.66,
+                    risk_budget_pct=0.012,
+                    budget_value=50000.0,
+                    currency="CNY",
+                    estimated_quantity=0,
+                    estimated_lots=0,
+                    note="突破后补仓",
+                ),
+            ),
+            picks=(
+                trend_strategy.TrendPick(
+                    ticker="603986",
+                    history_symbol="603986.SS",
+                    name="兆易创新",
+                    sector="半导体",
+                    market_label="A股",
+                    market_cap_b=120.0,
+                    score=18.5,
+                    weight=0.25,
+                    ret20=8.2,
+                    ret60=22.4,
+                    ret120=38.0,
+                    relative_strength_60d=9.5,
+                    volatility_20d=19.0,
+                    close=768.93,
+                ),
+            ),
+        )
+        text = trend_strategy.format_recommendation_digest_from_snapshot(snapshot)
+        self.assertIn("推荐日报", text)
+        self.assertIn("603986 兆易创新", text)
+        self.assertIn("预算 CNY 75,000", text)
+        self.assertIn("不足 1 手", text)
+        self.assertIn("突破 830.44 再加 10%", text)
+
     def test_sector_exposure_summary_groups_weights(self) -> None:
         picks = (
             trend_strategy.TrendPick("A", "A.SS", "A", "科技", "A股", 100, 1, 0.25, 0, 0, 0, 0, 0, 10),

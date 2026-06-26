@@ -64,6 +64,10 @@
     "backtest_months": [3, 6, 12],
     "max_age_minutes": 1440
   },
+  "recommendation_digest": {
+    "default_market": "全市场",
+    "top_n": 3
+  },
   "close_digest_watchlists": {
     "A股": ["600519.SS", "300750.SZ"],
     "HK": ["0700.HK", "9988.HK", "3690.HK"],

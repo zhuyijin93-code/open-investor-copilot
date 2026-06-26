@@ -134,6 +134,16 @@ class BotServiceTests(unittest.TestCase):
         self.assertEqual(reply.command, "plan")
         self.assertEqual(reply.text, "plan output")
 
+    def test_ideas_routes_to_recommendation_digest(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.build_recommendation_digest_text",
+            return_value="ideas output",
+        ) as build_ideas:
+            reply = bot_service.handle_message("推荐日报 A股 3")
+        build_ideas.assert_called_once_with("A股", top_n=3)
+        self.assertEqual(reply.command, "ideas")
+        self.assertEqual(reply.text, "ideas output")
+
     def test_default_market_is_used_when_configured(self) -> None:
         with (
             mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={"default_market": "A股"}),

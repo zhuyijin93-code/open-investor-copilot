@@ -83,6 +83,12 @@ Try:
 - `评分 600519 A股`
 - `股票池`
 - `股票池 A股`
+- `收盘总结 A股`
+- `收盘总结 港股`
+- `收盘总结 美股`
+- `推荐日报 全市场 3`
+- `推荐日报 A股 3`
+- `每日推荐 美股 3`
 
 Slash commands also work:
 
@@ -93,6 +99,8 @@ Slash commands also work:
 - `/score NVDA`
 - `/score 600519 A股`
 - `/universe A股`
+- `/close A股`
+- `/ideas 全市场 3`
 
 ## Larger Universe
 
@@ -179,6 +187,12 @@ Run the service:
 python3 -m quant_wechat_bot.bot_service serve --host 0.0.0.0 --port 8790
 ```
 
+Cloud platforms can now boot the same command without hardcoding a port:
+
+```bash
+python3 -m quant_wechat_bot.bot_service serve
+```
+
 Then point your callback URL to:
 
 ```text
@@ -191,6 +205,40 @@ Behavior today:
 - `POST /wechat/callback` verifies the signature and answers text messages
 - `subscribe` events return a help message
 - `CLICK` menu events route `EventKey` values into the same command core
+
+Health checks:
+
+- `GET /healthz`
+- `GET /api/health`
+
+## Public Deployment
+
+This repo now includes three deployment-friendly files at the repository root:
+
+- `Dockerfile`
+- `render.yaml`
+- `Procfile`
+
+Fastest path on Render:
+
+1. Push this repo to GitHub.
+2. In Render, create a new Blueprint or Web Service from the repo.
+3. If Render asks for a health check path, use `/healthz`.
+4. Add `WECHAT_OFFICIAL_TOKEN` only if you need the public-account callback.
+5. After deploy, point your WeChat callback URL to `https://your-domain/wechat/callback`.
+
+Fastest path on Railway:
+
+1. Create a new project from the same GitHub repo.
+2. Railway can use the included `Procfile` or `Dockerfile`.
+3. No custom start command is required.
+4. Add `WECHAT_OFFICIAL_TOKEN` if you want the callback adapter enabled.
+
+Notes:
+
+- The service auto-detects cloud `PORT` and binds to `0.0.0.0`.
+- Sample-universe commands work without extra configuration.
+- A-share commands still need outbound network access to fetch free market data.
 
 Example menu:
 
@@ -238,6 +286,67 @@ If you need a fresh QR login for the bridge:
 ```
 
 This route is intended for local testing and personal use first.
+
+## Close Summary Automation
+
+This workspace now includes a market-close digest generator that can be used
+both manually and in scheduled jobs.
+
+Preview locally:
+
+```bash
+python3 -m quant_wechat_bot.market_close_digest build --market A股
+python3 -m quant_wechat_bot.market_close_digest build --market 港股
+python3 -m quant_wechat_bot.market_close_digest build --market 美股
+```
+
+Send to your personal WeChat:
+
+```bash
+python3 -m quant_wechat_bot.market_close_digest send --market A股
+python3 -m quant_wechat_bot.market_close_digest send --market 港股
+python3 -m quant_wechat_bot.market_close_digest send --market 美股
+```
+
+Dry-run the delivery chain:
+
+```bash
+python3 -m quant_wechat_bot.market_close_digest send --market 美股 --dry-run
+```
+
+Behavior:
+
+- pulls close data from public Eastmoney daily-kline endpoints
+- merges built-in watchlists with any configured `close_digest_watchlists`
+- A-share digests append the local quality strategy's top names when available
+- keeps dedupe state in `quant_wechat_bot/.cache/close_digest_state.json`
+- skips stale sessions automatically, so the dual US checks do not double-send
+
+## Recommendation Digest Automation
+
+This workspace also includes a shorter trend-based recommendation digest that is
+better suited for daily push notifications.
+
+Preview locally:
+
+```bash
+python3 -m quant_wechat_bot.recommendation_digest build --market 全市场 --top-n 3
+python3 -m quant_wechat_bot.bot_service chat "推荐日报 A股 3"
+```
+
+Send to your personal WeChat:
+
+```bash
+python3 -m quant_wechat_bot.recommendation_digest send --market 全市场 --top-n 3
+python3 -m quant_wechat_bot.recommendation_digest send --market A股 --top-n 3
+```
+
+Behavior:
+
+- reuses the trend engine, market filter, and execution-plan sizing logic
+- highlights the highest-priority entry candidates plus any immediate risk-off exits
+- includes budget and estimated shares when `trend_order_sizing` is configured
+- keeps dedupe state in `quant_wechat_bot/.cache/recommendation_digest_state.json`
 
 ## Why This Can Be A Good Public Repo
 
