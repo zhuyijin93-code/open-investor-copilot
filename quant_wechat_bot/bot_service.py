@@ -598,7 +598,12 @@ def render_weekly_review_text(market: str | None = None, top_n: int = 5, months:
 
 def render_macro_opportunity_text(market: str | None = None) -> str:
     effective_market = market if market is not None else "全市场"
-    return truncate_reply(macro_opportunity.format_macro_scan(effective_market))
+    return truncate_reply(
+        macro_opportunity.format_macro_scan(
+            effective_market,
+            universe_path=resolve_trend_universe_path(effective_market),
+        )
+    )
 
 
 def render_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:

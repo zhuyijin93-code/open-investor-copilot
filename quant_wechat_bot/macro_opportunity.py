@@ -5,9 +5,10 @@ import datetime as dt
 from pathlib import Path
 
 try:
-    from . import market_close_digest, trend_strategy
+    from . import market_close_digest, quant_engine, trend_strategy
 except ImportError:  # pragma: no cover - allows direct script execution
     import market_close_digest  # type: ignore
+    import quant_engine  # type: ignore
     import trend_strategy  # type: ignore
 
 
@@ -37,6 +38,96 @@ class MacroOpportunity:
     score: float
     setup: str
     note: str
+
+
+@dataclasses.dataclass(frozen=True)
+class MacroStockCandidate:
+    ticker: str
+    name: str
+    market_label: str
+    sector: str
+    price: float
+    market_cap_b: float
+    momentum_20d: float
+    momentum_60d: float
+    score: float
+
+
+THEME_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "growth": (
+        "科技",
+        "软件",
+        "半导体",
+        "电子",
+        "互联网",
+        "通信",
+        "云",
+        "ai",
+        "software",
+        "semiconductor",
+        "internet",
+        "technology",
+        "tech",
+        "cloud",
+        "hardware",
+    ),
+    "finance": (
+        "金融",
+        "银行",
+        "保险",
+        "券商",
+        "broker",
+        "bank",
+        "insurance",
+        "financial",
+        "capital",
+    ),
+    "energy": (
+        "能源",
+        "石油",
+        "油气",
+        "煤",
+        "煤炭",
+        "电力",
+        "公用",
+        "oil",
+        "gas",
+        "energy",
+        "utilities",
+    ),
+    "gold": (
+        "黄金",
+        "贵金属",
+        "有色",
+        "gold",
+        "silver",
+        "metal",
+        "mining",
+    ),
+    "defensive": (
+        "消费",
+        "医药",
+        "公用",
+        "食品",
+        "饮料",
+        "health",
+        "consumer",
+        "utilities",
+        "pharma",
+    ),
+}
+
+NON_EQUITY_NAME_TOKENS = (
+    "etf",
+    "fund",
+    "trust",
+    "index",
+    "income",
+    "bond",
+    "treasury",
+    "yield",
+    "allocation",
+)
 
 
 MACRO_ASSET_SPECS: tuple[MacroAssetSpec, ...] = (
@@ -120,6 +211,11 @@ def macro_signal_note(spec: MacroAssetSpec, *, close: float, ma20: float, ret5: 
     if not above_ma and ret20 <= -4:
         return "景气降温", f"{spec.theme}回落，周期交易热度在降温。"
     return "中性观察", f"{spec.theme}仍在震荡，先结合其他市场信号确认。"
+
+
+def market_label_for_ticker(ticker: str) -> str:
+    code = trend_strategy.infer_market_code(ticker)
+    return trend_strategy.UNIVERSE_CONFIGS[code].label
 
 
 def signal_score_multiplier(spec: MacroAssetSpec) -> float:
@@ -251,10 +347,106 @@ def macro_wind_summary(opportunities: tuple[MacroOpportunity, ...]) -> str | Non
     return " | ".join(labels)
 
 
+def theme_group_for_opportunity(opportunity: MacroOpportunity) -> str | None:
+    theme = opportunity.spec.theme
+    label = opportunity.spec.label
+    if any(token in theme or token in label for token in ("科技", "成长", "纳指", "互联网", "半导体", "软件")):
+        return "growth"
+    if any(token in theme or token in label for token in ("金融", "银行", "保险")):
+        return "finance"
+    if any(token in theme or token in label for token in ("能源", "原油", "油", "气", "煤")):
+        return "energy"
+    if any(token in theme or token in label for token in ("黄金", "贵金属")):
+        return "gold"
+    if any(token in theme or token in label for token in ("宽基", "小盘")):
+        return None
+    if opportunity.spec.signal_kind == "defensive":
+        return "defensive"
+    return None
+
+
+def theme_candidate_rows(
+    rows: list[dict[str, object]],
+    opportunity: MacroOpportunity,
+) -> list[dict[str, object]]:
+    market_code = opportunity.spec.market_code
+    selected = [
+        row
+        for row in rows
+        if trend_strategy.infer_market_code(str(row["ticker"])) == market_code
+    ]
+    equity_like = [
+        row
+        for row in selected
+        if not any(token in str(row["name"]).lower() for token in NON_EQUITY_NAME_TOKENS)
+    ]
+    theme_group = theme_group_for_opportunity(opportunity)
+    if theme_group is None:
+        return equity_like or selected
+    keywords = THEME_KEYWORDS.get(theme_group, ())
+    themed = []
+    for row in equity_like:
+        sector = str(row["sector"]).lower()
+        name = str(row["name"]).lower()
+        if any(keyword.lower() in sector or keyword.lower() in name for keyword in keywords):
+            themed.append(row)
+    return themed
+
+
+def ranked_macro_stock_candidates(
+    universe_path: str | Path,
+    opportunity: MacroOpportunity,
+    *,
+    top_n: int = 3,
+) -> tuple[MacroStockCandidate, ...]:
+    rows = quant_engine.load_universe(universe_path)
+    filtered = theme_candidate_rows(rows, opportunity)
+    if not filtered:
+        return tuple()
+    if opportunity.spec.label == "罗素2000":
+        filtered = sorted(filtered, key=lambda row: (float(row["market_cap_b"]), -float(row["momentum_60d"])))[:20]
+    scored = quant_engine.score_rows(filtered, quant_engine.STRATEGIES["momentum"])
+    selected = [row for row in scored if bool(row["passes_filter"])]
+    if not selected:
+        selected = scored
+    candidates = []
+    for row in selected[:top_n]:
+        candidates.append(
+            MacroStockCandidate(
+                ticker=str(row["ticker"]),
+                name=str(row["name"]),
+                market_label=market_label_for_ticker(str(row["ticker"])),
+                sector=str(row["sector"]),
+                price=float(row["price"]),
+                market_cap_b=float(row["market_cap_b"]),
+                momentum_20d=float(row["momentum_20d"]),
+                momentum_60d=float(row["momentum_60d"]),
+                score=float(row["score"]),
+            )
+        )
+    return tuple(candidates)
+
+
+def linked_stock_baskets(
+    opportunities: tuple[MacroOpportunity, ...],
+    universe_path: str | Path | None,
+) -> tuple[tuple[MacroOpportunity, tuple[MacroStockCandidate, ...]], ...]:
+    if universe_path is None:
+        return tuple()
+    linked: list[tuple[MacroOpportunity, tuple[MacroStockCandidate, ...]]] = []
+    for item in preferred_opportunities(opportunities)[:3]:
+        candidates = ranked_macro_stock_candidates(universe_path, item, top_n=3)
+        if not candidates:
+            continue
+        linked.append((item, candidates))
+    return tuple(linked)
+
+
 def format_macro_scan(
     market: str | None = None,
     *,
     history_fetcher: trend_strategy.HistoryFetcher | None = None,
+    universe_path: str | Path | None = None,
 ) -> str:
     opportunities, failures = build_macro_opportunities(market, history_fetcher=history_fetcher)
     if not opportunities:
@@ -266,6 +458,7 @@ def format_macro_scan(
     preferred = preferred_opportunities(opportunities)
     weak = weak_links(opportunities)
     macro_variables = macro_variable_signals(opportunities)
+    linked_baskets = linked_stock_baskets(opportunities, universe_path)
     lines = [
         f"【宏观机会扫描｜{session_date.isoformat()}】",
         f"观察范围: {label}",
@@ -296,6 +489,14 @@ def format_macro_scan(
             lines.append(
                 f"   信号: {item.setup} | 收盘 {item.close:.2f} vs MA20 {item.ma20:.2f} ({item.pct_from_ma20:+.1f}%) | {item.note}"
             )
+    if linked_baskets:
+        lines.extend(["", "主线联动个股"])
+        for opportunity, candidates in linked_baskets:
+            lines.append(f"- {opportunity.spec.label} -> {opportunity.spec.theme}")
+            for candidate in candidates:
+                lines.append(
+                    f"  {candidate.ticker} {candidate.name} | {candidate.market_label}/{candidate.sector} | 分数 {candidate.score:.1f} | 20D {candidate.momentum_20d:+.1f}% | 60D {candidate.momentum_60d:+.1f}%"
+                )
     if weak:
         lines.extend(["", "降温/回避"])
         for item in weak:
@@ -310,6 +511,7 @@ def format_macro_scan(
             "说明:",
             "- 这是一层先选市场/主题的宏观雷达，用来决定先看哪一类交易，而不是直接替代个股执行。",
             "- 更适合先看 `宏观机会`，再下沉到 `推荐日报`、`趋势选股` 或 `交易计划`。",
+            "- `主线联动个股` 会把最强主题直接映射到当前股票池里的候选股，方便继续深挖。",
         ]
     )
     return "\n".join(lines)

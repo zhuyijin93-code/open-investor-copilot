@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from quant_wechat_bot import macro_opportunity
@@ -66,6 +68,38 @@ class MacroOpportunityTests(unittest.TestCase):
         self.assertEqual(opportunities[0].spec.label, "创业板")
         self.assertEqual(len(failures), 1)
 
+    def test_ranked_macro_stock_candidates_links_theme_to_universe_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "universe.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "ticker,name,sector,price,market_cap_b,pe,pb,roe,revenue_growth,momentum_20d,momentum_60d,volatility_20d,dividend_yield",
+                        "MSFT,Microsoft,Software,500,3000,30,8,0.2,0.1,8,15,20,0.8",
+                        "NVDA,Nvidia,Semiconductor,900,3500,40,15,0.3,0.2,12,25,30,0.1",
+                        "XOM,Exxon,Energy,100,450,15,2,0.1,0.05,3,6,18,3.5",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            opportunity = macro_opportunity.MacroOpportunity(
+                spec=macro_opportunity.MacroAssetSpec("QQQ", "纳指100", "美股科技", "US", "risk", "risk"),
+                session_date=dt.date(2025, 2, 1),
+                close=100.0,
+                day_change=1.0,
+                ret5=2.0,
+                ret20=8.0,
+                ma20=95.0,
+                pct_from_ma20=5.0,
+                score=10.0,
+                setup="趋势观察",
+                note="科技维持强势",
+            )
+            candidates = macro_opportunity.ranked_macro_stock_candidates(path, opportunity, top_n=2)
+        self.assertTrue(candidates)
+        self.assertEqual(candidates[0].ticker, "NVDA")
+        self.assertIn(candidates[1].ticker, {"MSFT", "NVDA"})
+
     def test_format_macro_scan_includes_dollar_yield_and_vix_signals(self) -> None:
         specs = (
             macro_opportunity.MacroAssetSpec("SPY", "标普500", "美股宽基", "US", "risk", "risk"),
@@ -88,6 +122,33 @@ class MacroOpportunityTests(unittest.TestCase):
         self.assertIn("流动性顺风", text)
         self.assertIn("利率回落", text)
         self.assertIn("波动降温", text)
+
+    def test_format_macro_scan_includes_linked_stock_baskets(self) -> None:
+        specs = (
+            macro_opportunity.MacroAssetSpec("QQQ", "纳指100", "美股科技", "US", "risk", "risk"),
+            macro_opportunity.MacroAssetSpec("DXY", "美元指数", "美元流动性", "GLOBAL", "macro", "dollar"),
+        )
+        histories = {
+            "QQQ": build_series(400.0, 2.0),
+            "DXY": build_series(100.0, -0.5),
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "universe.csv"
+            path.write_text(
+                "\n".join(
+                    [
+                        "ticker,name,sector,price,market_cap_b,pe,pb,roe,revenue_growth,momentum_20d,momentum_60d,volatility_20d,dividend_yield",
+                        "NVDA,Nvidia,Semiconductor,900,3500,40,15,0.3,0.2,12,25,30,0.1",
+                        "MSFT,Microsoft,Software,500,3000,30,8,0.2,0.1,8,15,20,0.8",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch("quant_wechat_bot.macro_opportunity.MACRO_ASSET_SPECS", specs):
+                text = macro_opportunity.format_macro_scan("全市场", history_fetcher=histories.__getitem__, universe_path=path)
+        self.assertIn("主线联动个股", text)
+        self.assertIn("NVDA", text)
+        self.assertIn("MSFT", text)
 
 
 if __name__ == "__main__":
