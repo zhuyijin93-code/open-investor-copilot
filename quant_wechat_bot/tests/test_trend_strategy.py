@@ -32,6 +32,11 @@ def build_series(start_price: float, slope: float, days: int = 320) -> list[tupl
     return [(base + dt.timedelta(days=index), start_price + slope * index) for index in range(days)]
 
 
+def build_custom_series(prices: list[float], start: dt.date | None = None) -> list[tuple[dt.date, float]]:
+    base = start or dt.date(2025, 1, 1)
+    return [(base + dt.timedelta(days=index), price) for index, price in enumerate(prices)]
+
+
 def build_row(ticker: str, name: str, sector: str, price: float, market_cap_b: float) -> dict[str, str]:
     return {
         "ticker": ticker,
@@ -130,6 +135,7 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertIsNotNone(report.best_day)
         self.assertIsNotNone(report.worst_day)
         self.assertGreaterEqual(report.average_invested_weight, 0)
+        self.assertIsInstance(report.exit_reason_counts, tuple)
 
     def test_backtest_cost_model_can_be_overridden_from_settings(self) -> None:
         with mock.patch(
@@ -146,6 +152,22 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertEqual(cost_model.commission_bps, 1.5)
         self.assertEqual(cost_model.slippage_bps, 4.0)
         self.assertEqual(cost_model.sell_tax_bps["CN"], 12.0)
+
+    def test_exit_rules_can_be_overridden_from_settings(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.trend_strategy.market_close_digest.load_settings",
+            return_value={
+                "trend_exit_rules": {
+                    "stop_loss_pct": 0.08,
+                    "trailing_stop_pct": 0.10,
+                    "trend_break_window": 10,
+                }
+            },
+        ):
+            exit_rules = trend_strategy.load_exit_rules()
+        self.assertAlmostEqual(exit_rules.stop_loss_pct, 0.08)
+        self.assertAlmostEqual(exit_rules.trailing_stop_pct, 0.10)
+        self.assertEqual(exit_rules.trend_break_window, 10)
 
     def test_build_trend_snapshot_enforces_sector_weight_cap(self) -> None:
         sector_path = Path(self.temp_dir.name) / "sector_cap.csv"
@@ -253,6 +275,91 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertAlmostEqual(buy_turnover, 0.0, places=4)
         self.assertAlmostEqual(sell_turnover, 0.4, places=4)
         self.assertAlmostEqual(cost_drag, 0.0006, places=6)
+
+    def test_simulate_period_portfolio_moves_to_cash_after_stop_loss(self) -> None:
+        base = dt.date(2025, 1, 1)
+        history = build_custom_series([100.0, 104.0, 109.0, 88.0, 87.0], start=base)
+        holding = trend_strategy.TrendPick(
+            "600519",
+            "600519.SS",
+            "Alpha",
+            "消费",
+            "A股",
+            100.0,
+            10.0,
+            0.50,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100.0,
+        )
+        gross_return, contributions, exit_events, daily_path, average_invested_weight = trend_strategy.simulate_period_portfolio(
+            (holding,),
+            {"600519.SS": history},
+            base,
+            base + dt.timedelta(days=4),
+            [item[0] for item in history],
+            trend_strategy.TrendExitRules(stop_loss_pct=0.10, trailing_stop_pct=0.30, trend_break_window=0),
+        )
+        self.assertAlmostEqual(gross_return, -0.06, places=4)
+        self.assertEqual(len(exit_events), 1)
+        self.assertEqual(exit_events[0].reason, "止损")
+        self.assertAlmostEqual(contributions[0].contribution, -0.06, places=4)
+        self.assertAlmostEqual(daily_path[-1].gross_value, 0.94, places=4)
+        self.assertLess(average_invested_weight, 0.5)
+
+    def test_build_trade_plan_marks_stop_loss_sell_reason(self) -> None:
+        base = dt.date(2025, 1, 1)
+        history = build_custom_series([100.0, 103.0, 108.0, 88.0, 87.0], start=base)
+        previous = (
+            trend_strategy.TrendPick(
+                "600519",
+                "600519.SS",
+                "Alpha",
+                "消费",
+                "A股",
+                100.0,
+                10.0,
+                0.25,
+                0,
+                0,
+                0,
+                0,
+                0,
+                100.0,
+            ),
+        )
+        current: tuple[trend_strategy.TrendPick, ...] = tuple()
+        current_regimes = {
+            "CN": trend_strategy.RegimeSnapshot(
+                market_code="CN",
+                market_label="A股",
+                benchmark_symbol="000300.SS",
+                benchmark_name="沪深300",
+                as_of=base + dt.timedelta(days=4),
+                close=100.0,
+                ma20=99.0,
+                ma60=98.0,
+                ma120=97.0,
+                ret60=1.0,
+                risk_on=True,
+                signals_on=3,
+            )
+        }
+        plan = trend_strategy.build_trade_plan(
+            previous,
+            current,
+            current_regimes,
+            {"600519.SS": history},
+            [item[0] for item in history],
+            base,
+            base + dt.timedelta(days=4),
+            trend_strategy.TrendExitRules(stop_loss_pct=0.10, trailing_stop_pct=0.30, trend_break_window=0),
+        )
+        self.assertEqual(plan[0].action, "卖出")
+        self.assertEqual(plan[0].reason, "止损")
 
     def test_sector_exposure_summary_groups_weights(self) -> None:
         picks = (

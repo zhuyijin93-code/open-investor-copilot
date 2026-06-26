@@ -26,6 +26,11 @@
       "US": 0.33
     }
   },
+  "trend_exit_rules": {
+    "stop_loss_pct": 0.12,
+    "trailing_stop_pct": 0.15,
+    "trend_break_window": 20
+  },
   "close_digest_watchlists": {
     "A股": ["600519.SS", "300750.SZ"],
     "HK": ["0700.HK", "9988.HK", "3690.HK"],

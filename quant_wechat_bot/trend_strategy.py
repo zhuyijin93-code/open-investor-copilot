@@ -29,6 +29,9 @@ MAX_SECTOR_POSITIONS = 2
 MAX_SECTOR_WEIGHT = 0.35
 TARGET_GROSS_EXPOSURE = 1.0
 MIN_POSITION_WEIGHT = 0.02
+DEFAULT_STOP_LOSS_PCT = 0.12
+DEFAULT_TRAILING_STOP_PCT = 0.15
+DEFAULT_TREND_BREAK_WINDOW = 20
 MAX_WORKERS = 6
 DEFAULT_COMMISSION_BPS = 2.0
 DEFAULT_SLIPPAGE_BPS = 8.0
@@ -95,8 +98,11 @@ class TrendSnapshot:
     cash_weight: float
     regimes: tuple[RegimeSnapshot, ...]
     constraints: PortfolioConstraints
+    exit_rules: TrendExitRules
     market_exposures: tuple[MarketExposure, ...]
     constraint_diagnostics: ConstraintDiagnostics
+    previous_rebalance_date: dt.date | None
+    trade_plan: tuple[TradeInstruction, ...]
     picks: tuple[TrendPick, ...]
 
 
@@ -117,6 +123,16 @@ class MarketExposure:
 
 
 @dataclasses.dataclass(frozen=True)
+class TradeInstruction:
+    action: str
+    ticker: str
+    name: str
+    from_weight: float
+    to_weight: float
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
 class BacktestCostModel:
     commission_bps: float
     slippage_bps: float
@@ -133,12 +149,28 @@ class PortfolioConstraints:
 
 
 @dataclasses.dataclass(frozen=True)
+class TrendExitRules:
+    stop_loss_pct: float
+    trailing_stop_pct: float
+    trend_break_window: int
+
+
+@dataclasses.dataclass(frozen=True)
 class ConstraintDiagnostics:
     skipped_sector_position_limit: int = 0
     skipped_sector_weight_limit: int = 0
     skipped_market_budget_limit: int = 0
     skipped_small_remainder: int = 0
     partial_weight_positions: int = 0
+
+
+@dataclasses.dataclass(frozen=True)
+class ExitEvent:
+    ticker: str
+    name: str
+    session_date: dt.date
+    reason: str
+    return_pct: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -165,6 +197,12 @@ class DailyReturnSummary:
 
 
 @dataclasses.dataclass(frozen=True)
+class PeriodValuePoint:
+    session_date: dt.date
+    gross_value: float
+
+
+@dataclasses.dataclass(frozen=True)
 class BacktestPeriod:
     start_date: dt.date
     end_date: dt.date
@@ -178,6 +216,14 @@ class BacktestPeriod:
     holdings: tuple[TrendPick, ...]
     risk_on_markets: tuple[str, ...]
     contributions: tuple[PeriodContribution, ...]
+    exit_events: tuple[ExitEvent, ...]
+    daily_path: tuple[PeriodValuePoint, ...]
+
+
+@dataclasses.dataclass(frozen=True)
+class ExitReasonCount:
+    reason: str
+    count: int
 
 
 @dataclasses.dataclass(frozen=True)
@@ -203,6 +249,7 @@ class BacktestReport:
     daily_curve: tuple[DailyEquityPoint, ...]
     best_day: DailyReturnSummary | None
     worst_day: DailyReturnSummary | None
+    exit_reason_counts: tuple[ExitReasonCount, ...]
     periods: tuple[BacktestPeriod, ...]
     latest_snapshot: TrendSnapshot
 
@@ -376,6 +423,25 @@ def load_portfolio_constraints(target_codes: tuple[str, ...]) -> PortfolioConstr
     )
 
 
+def load_exit_rules() -> TrendExitRules:
+    settings = market_close_digest.load_settings()
+    payload = settings.get("trend_exit_rules")
+    stop_loss_pct = DEFAULT_STOP_LOSS_PCT
+    trailing_stop_pct = DEFAULT_TRAILING_STOP_PCT
+    trend_break_window = DEFAULT_TREND_BREAK_WINDOW
+    if isinstance(payload, Mapping):
+        stop_loss_pct = clamp_weight(payload.get("stop_loss_pct"), stop_loss_pct)
+        trailing_stop_pct = clamp_weight(payload.get("trailing_stop_pct"), trailing_stop_pct)
+        raw_window = payload.get("trend_break_window")
+        if isinstance(raw_window, int) and raw_window >= 0:
+            trend_break_window = raw_window
+    return TrendExitRules(
+        stop_loss_pct=stop_loss_pct,
+        trailing_stop_pct=trailing_stop_pct,
+        trend_break_window=trend_break_window,
+    )
+
+
 def summarize_sector_exposures(picks: tuple[TrendPick, ...] | list[TrendPick]) -> tuple[SectorExposure, ...]:
     exposures: dict[str, SectorExposure] = {}
     for item in picks:
@@ -444,6 +510,33 @@ def summarize_market_exposures(
             count=item.count,
         )
         for item in ordered
+    )
+
+
+def exit_rule_summary(exit_rules: TrendExitRules) -> str:
+    parts = [
+        f"止损 {exit_rules.stop_loss_pct * 100:.0f}%",
+        f"移动止盈 {exit_rules.trailing_stop_pct * 100:.0f}%",
+    ]
+    if exit_rules.trend_break_window > 0:
+        parts.append(f"跌破 MA{exit_rules.trend_break_window}")
+    return " | ".join(parts)
+
+
+def trade_action_rank(action: str) -> int:
+    order = {
+        "卖出": 0,
+        "减仓": 1,
+        "加仓": 2,
+        "买入": 3,
+    }
+    return order.get(action, 9)
+
+
+def format_trade_plan_item(item: TradeInstruction) -> str:
+    return (
+        f"- {item.action} {item.ticker} {item.name} | "
+        f"{item.from_weight * 100:.0f}% -> {item.to_weight * 100:.0f}% | {item.reason}"
     )
 
 
@@ -867,6 +960,7 @@ def build_trend_snapshot(
         raise RuntimeError("No liquid large-cap candidates passed the initial market filters.")
     target_codes = resolve_market_codes(market)
     active_constraints = constraints or load_portfolio_constraints(target_codes)
+    exit_rules = load_exit_rules()
     effective_as_of = as_of or dt.date.today()
     benchmark_histories, benchmark_failures = load_histories(
         [UNIVERSE_CONFIGS[code].benchmark_symbol for code in target_codes],
@@ -883,6 +977,7 @@ def build_trend_snapshot(
     history_symbols = [history_symbol_for_ticker(str(row["ticker"])) for row in rows]
     stock_histories, stock_failures = load_histories(history_symbols, history_fetcher=history_fetcher)
     merged_histories = {**benchmark_histories, **stock_histories}
+    reference_dates = resolve_reference_dates(benchmark_histories, target_codes, effective_as_of)
     picks, evaluated_count, constraint_diagnostics = select_picks(
         rows,
         merged_histories,
@@ -890,6 +985,36 @@ def build_trend_snapshot(
         effective_as_of,
         top_n=top_n,
         constraints=active_constraints,
+    )
+    previous_date = resolve_previous_rebalance_date(reference_dates, effective_as_of)
+    previous_picks: tuple[TrendPick, ...] = tuple()
+    if previous_date is not None:
+        previous_regimes: dict[str, RegimeSnapshot] = {}
+        for code in target_codes:
+            history = benchmark_histories.get(UNIVERSE_CONFIGS[code].benchmark_symbol)
+            if history is None:
+                continue
+            snapshot = evaluate_regime(code, history, previous_date)
+            if snapshot is not None:
+                previous_regimes[code] = snapshot
+        previous_selection, _, _ = select_picks(
+            rows,
+            merged_histories,
+            previous_regimes,
+            previous_date,
+            top_n=top_n,
+            constraints=active_constraints,
+        )
+        previous_picks = tuple(previous_selection)
+    trade_plan = build_trade_plan(
+        previous_picks,
+        tuple(picks),
+        regimes,
+        merged_histories,
+        reference_dates,
+        previous_date,
+        effective_as_of,
+        exit_rules,
     )
     invested_weight = round(sum(item.weight for item in picks), 4)
     return TrendSnapshot(
@@ -902,10 +1027,272 @@ def build_trend_snapshot(
         cash_weight=round(max(0.0, 1.0 - invested_weight), 4),
         regimes=tuple(regimes[code] for code in target_codes if code in regimes),
         constraints=active_constraints,
+        exit_rules=exit_rules,
         market_exposures=summarize_market_exposures(picks, active_constraints),
         constraint_diagnostics=constraint_diagnostics,
+        previous_rebalance_date=previous_date,
+        trade_plan=trade_plan,
         picks=tuple(picks),
     )
+
+
+def resolve_reference_dates(
+    benchmark_histories: Mapping[str, list[tuple[dt.date, float]]],
+    target_codes: tuple[str, ...],
+    as_of: dt.date | None = None,
+) -> list[dt.date]:
+    dates = sorted(
+        {
+            session_date
+            for code in target_codes
+            for session_date, _ in benchmark_histories.get(UNIVERSE_CONFIGS[code].benchmark_symbol, [])
+            if as_of is None or session_date <= as_of
+        }
+    )
+    return dates
+
+
+def resolve_previous_rebalance_date(reference_dates: list[dt.date], as_of: dt.date) -> dt.date | None:
+    eligible = [item for item in reference_dates if item <= as_of]
+    if len(eligible) <= REBALANCE_DAYS:
+        return None
+    return eligible[-(REBALANCE_DAYS + 1)]
+
+
+def detect_exit_reason(
+    history: list[tuple[dt.date, float]],
+    start_price: float,
+    peak_price: float,
+    session_date: dt.date,
+    exit_rules: TrendExitRules,
+) -> str | None:
+    price = price_on_or_before(history, session_date)
+    if price in (None, 0):
+        return None
+    if exit_rules.stop_loss_pct > 0 and price <= start_price * (1.0 - exit_rules.stop_loss_pct):
+        return "止损"
+    if (
+        exit_rules.trailing_stop_pct > 0
+        and peak_price > start_price
+        and price <= peak_price * (1.0 - exit_rules.trailing_stop_pct)
+    ):
+        return "移动止盈"
+    if exit_rules.trend_break_window <= 0:
+        return None
+    points = latest_points(history, session_date)
+    if len(points) <= exit_rules.trend_break_window:
+        return None
+    closes = [close for _, close in points]
+    trend_ma = moving_average(closes, exit_rules.trend_break_window)
+    short_lookback = min(20, max(5, exit_rules.trend_break_window))
+    short_return = trailing_return(closes, short_lookback) if len(closes) > short_lookback else 0.0
+    if price < trend_ma and short_return < 0:
+        return f"跌破MA{exit_rules.trend_break_window}"
+    return None
+
+
+def simulate_holding_period(
+    holding: TrendPick,
+    history: list[tuple[dt.date, float]],
+    start_date: dt.date,
+    end_date: dt.date,
+    reference_dates: list[dt.date],
+    exit_rules: TrendExitRules,
+) -> tuple[PeriodContribution | None, ExitEvent | None, tuple[PeriodValuePoint, ...], tuple[PeriodValuePoint, ...]]:
+    start_price = price_on_or_before(history, start_date)
+    if start_price in (None, 0):
+        return None, None, tuple(), tuple()
+    relevant_dates = [item for item in reference_dates if start_date < item <= end_date]
+    if not relevant_dates:
+        relevant_dates = [end_date]
+    peak_price = float(start_price)
+    locked_multiplier = 1.0
+    exit_event: ExitEvent | None = None
+    active = True
+    daily_values: list[PeriodValuePoint] = []
+    invested_values: list[PeriodValuePoint] = []
+    for session_date in relevant_dates:
+        if active:
+            price = price_on_or_before(history, session_date)
+            if price is None:
+                multiplier = locked_multiplier
+            else:
+                peak_price = max(peak_price, price)
+                multiplier = price / start_price
+            reason = detect_exit_reason(history, float(start_price), peak_price, session_date, exit_rules)
+            if reason is not None and exit_event is None:
+                exit_event = ExitEvent(
+                    ticker=holding.ticker,
+                    name=holding.name,
+                    session_date=session_date,
+                    reason=reason,
+                    return_pct=multiplier - 1.0,
+                )
+                active = False
+                locked_multiplier = multiplier
+            else:
+                locked_multiplier = multiplier
+            invested_values.append(
+                PeriodValuePoint(session_date=session_date, gross_value=round(holding.weight * multiplier, 6))
+            )
+        else:
+            multiplier = locked_multiplier
+            invested_values.append(PeriodValuePoint(session_date=session_date, gross_value=0.0))
+        daily_values.append(
+            PeriodValuePoint(session_date=session_date, gross_value=round(holding.weight * multiplier, 6))
+        )
+    final_multiplier = locked_multiplier
+    contribution = PeriodContribution(
+        ticker=holding.ticker,
+        name=holding.name,
+        weight=holding.weight,
+        asset_return=final_multiplier - 1.0,
+        contribution=holding.weight * (final_multiplier - 1.0),
+    )
+    return contribution, exit_event, tuple(daily_values), tuple(invested_values)
+
+
+def simulate_period_portfolio(
+    holdings: tuple[TrendPick, ...],
+    histories: dict[str, list[tuple[dt.date, float]]],
+    start_date: dt.date,
+    end_date: dt.date,
+    reference_dates: list[dt.date],
+    exit_rules: TrendExitRules,
+) -> tuple[float, tuple[PeriodContribution, ...], tuple[ExitEvent, ...], tuple[PeriodValuePoint, ...], float]:
+    relevant_dates = [item for item in reference_dates if start_date < item <= end_date]
+    if not relevant_dates:
+        relevant_dates = [end_date]
+    cash_weight = max(0.0, 1.0 - sum(item.weight for item in holdings))
+    daily_totals = {item: cash_weight for item in relevant_dates}
+    daily_invested = {item: 0.0 for item in relevant_dates}
+    contributions: list[PeriodContribution] = []
+    exit_events: list[ExitEvent] = []
+    for holding in holdings:
+        history = histories.get(holding.history_symbol)
+        if history is None:
+            continue
+        contribution, exit_event, daily_values, invested_values = simulate_holding_period(
+            holding,
+            history,
+            start_date,
+            end_date,
+            reference_dates,
+            exit_rules,
+        )
+        if contribution is None:
+            continue
+        contributions.append(contribution)
+        if exit_event is not None:
+            exit_events.append(exit_event)
+        for point in daily_values:
+            daily_totals[point.session_date] = daily_totals.get(point.session_date, cash_weight) + point.gross_value
+        for point in invested_values:
+            daily_invested[point.session_date] = daily_invested.get(point.session_date, 0.0) + point.gross_value
+    daily_path = tuple(
+        PeriodValuePoint(session_date=item, gross_value=round(daily_totals.get(item, 1.0), 6))
+        for item in relevant_dates
+    )
+    ending_value = daily_path[-1].gross_value if daily_path else 1.0
+    invested_ratios = [
+        (daily_invested[item] / daily_totals[item]) if daily_totals[item] > 0 else 0.0
+        for item in relevant_dates
+    ]
+    average_invested_weight = sum(invested_ratios) / len(invested_ratios) if invested_ratios else 0.0
+    return (
+        ending_value - 1.0,
+        tuple(sorted(contributions, key=lambda item: item.contribution, reverse=True)),
+        tuple(sorted(exit_events, key=lambda item: (item.session_date, item.ticker))),
+        daily_path,
+        average_invested_weight,
+    )
+
+
+def summarize_exit_reasons(periods: list[BacktestPeriod]) -> tuple[ExitReasonCount, ...]:
+    counts: dict[str, int] = {}
+    for period in periods:
+        for event in period.exit_events:
+            counts[event.reason] = counts.get(event.reason, 0) + 1
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return tuple(ExitReasonCount(reason=reason, count=count) for reason, count in ordered)
+
+
+def build_trade_plan(
+    previous: tuple[TrendPick, ...],
+    current: tuple[TrendPick, ...],
+    current_regimes: Mapping[str, RegimeSnapshot],
+    histories: dict[str, list[tuple[dt.date, float]]],
+    reference_dates: list[dt.date],
+    previous_rebalance_date: dt.date | None,
+    as_of: dt.date,
+    exit_rules: TrendExitRules,
+) -> tuple[TradeInstruction, ...]:
+    if previous_rebalance_date is None:
+        return tuple()
+    previous_map = {item.ticker: item for item in previous}
+    current_map = {item.ticker: item for item in current}
+    exit_reason_by_ticker: dict[str, str] = {}
+    for item in previous:
+        history = histories.get(item.history_symbol)
+        if history is None:
+            continue
+        _, exit_event, _, _ = simulate_holding_period(
+            item,
+            history,
+            previous_rebalance_date,
+            as_of,
+            reference_dates,
+            exit_rules,
+        )
+        if exit_event is not None:
+            exit_reason_by_ticker[item.ticker] = exit_event.reason
+    plan: list[TradeInstruction] = []
+    for ticker, previous_item in previous_map.items():
+        current_item = current_map.get(ticker)
+        if current_item is None:
+            regime = current_regimes.get(infer_market_code(ticker))
+            reason = "市场 Risk OFF" if regime is not None and not regime.risk_on else exit_reason_by_ticker.get(ticker, "强度调出")
+            plan.append(
+                TradeInstruction(
+                    action="卖出",
+                    ticker=previous_item.ticker,
+                    name=previous_item.name,
+                    from_weight=previous_item.weight,
+                    to_weight=0.0,
+                    reason=reason,
+                )
+            )
+            continue
+        if abs(current_item.weight - previous_item.weight) < 0.0005:
+            continue
+        plan.append(
+            TradeInstruction(
+                action="加仓" if current_item.weight > previous_item.weight else "减仓",
+                ticker=current_item.ticker,
+                name=current_item.name,
+                from_weight=previous_item.weight,
+                to_weight=current_item.weight,
+                reason="仓位再平衡",
+            )
+        )
+    for ticker, current_item in current_map.items():
+        if ticker in previous_map:
+            continue
+        plan.append(
+            TradeInstruction(
+                action="买入",
+                ticker=current_item.ticker,
+                name=current_item.name,
+                from_weight=0.0,
+                to_weight=current_item.weight,
+                reason="新开仓",
+            )
+        )
+    ordered = sorted(
+        plan,
+        key=lambda item: (trade_action_rank(item.action), -(abs(item.to_weight - item.from_weight)), item.ticker),
+    )
+    return tuple(ordered)
 
 
 def period_return(
@@ -998,8 +1385,6 @@ def transaction_cost_drag(
 
 def build_daily_equity_curve(
     periods: list[BacktestPeriod],
-    histories: dict[str, list[tuple[dt.date, float]]],
-    reference_dates: list[dt.date],
 ) -> tuple[DailyEquityPoint, ...]:
     curve: list[DailyEquityPoint] = []
     gross_nav = 1.0
@@ -1008,17 +1393,17 @@ def build_daily_equity_curve(
     for period in periods:
         gross_start = gross_nav
         net_start = net_nav * (1.0 - period.cost_drag)
-        period_dates = [item for item in reference_dates if period.start_date < item <= period.end_date]
-        if not period_dates:
-            period_dates = [period.end_date]
-        for session_date in period_dates:
-            gross_return_to_date = period_return(period.holdings, histories, period.start_date, session_date)
-            gross_value = gross_start * (1.0 + gross_return_to_date)
-            net_value = net_start * (1.0 + gross_return_to_date)
+        if not period.daily_path:
+            period_path = (PeriodValuePoint(session_date=period.end_date, gross_value=1.0 + period.gross_return),)
+        else:
+            period_path = period.daily_path
+        for point in period_path:
+            gross_value = gross_start * point.gross_value
+            net_value = net_start * point.gross_value
             peak = max(peak, net_value)
             curve.append(
                 DailyEquityPoint(
-                    session_date=session_date,
+                    session_date=point.session_date,
                     gross_value=round(gross_value, 6),
                     net_value=round(net_value, 6),
                     drawdown=round(net_value / peak - 1.0, 6),
@@ -1077,19 +1462,15 @@ def backtest_trend_strategy(
         raise RuntimeError("No liquid large-cap candidates passed the initial market filters.")
     target_codes = resolve_market_codes(market)
     constraints = load_portfolio_constraints(target_codes)
+    exit_rules = load_exit_rules()
     benchmark_symbols = [UNIVERSE_CONFIGS[code].benchmark_symbol for code in target_codes]
     stock_symbols = [history_symbol_for_ticker(str(row["ticker"])) for row in rows]
     histories, failures = load_histories(benchmark_symbols + stock_symbols, history_fetcher=history_fetcher)
     for symbol in benchmark_symbols:
         if symbol not in histories:
             raise RuntimeError(f"Missing benchmark history for `{symbol}`.")
-    reference_dates = sorted(
-        {
-            session_date
-            for symbol in benchmark_symbols
-            for session_date, _ in histories.get(symbol, [])
-        }
-    )
+    benchmark_histories = {symbol: histories[symbol] for symbol in benchmark_symbols}
+    reference_dates = resolve_reference_dates(benchmark_histories, target_codes)
     required_periods = max(4, lookback_months)
     required_points = required_periods * TRADING_DAYS_PER_MONTH + MIN_HISTORY_BARS
     if len(reference_dates) < required_points:
@@ -1118,8 +1499,14 @@ def backtest_trend_strategy(
             constraints=constraints,
         )
         current_holdings = tuple(holdings)
-        contributions = period_contributions(current_holdings, histories, start_date, end_date)
-        gross_return = sum(item.contribution for item in contributions)
+        gross_return, contributions, exit_events, daily_path, average_invested_weight = simulate_period_portfolio(
+            current_holdings,
+            histories,
+            start_date,
+            end_date,
+            reference_dates,
+            exit_rules,
+        )
         buy_turnover, sell_turnover, cost_drag = transaction_cost_drag(previous_holdings, current_holdings, cost_model)
         realized_return = gross_return - cost_drag
         gross_equity_curve.append(gross_equity_curve[-1] * (1.0 + gross_return))
@@ -1131,7 +1518,7 @@ def backtest_trend_strategy(
                 gross_return=gross_return,
                 cost_drag=cost_drag,
                 portfolio_return=realized_return,
-                invested_weight=round(sum(item.weight for item in current_holdings), 4),
+                invested_weight=round(average_invested_weight, 4),
                 turnover=round(turnover_ratio(previous_holdings, current_holdings), 4),
                 buy_turnover=round(buy_turnover, 4),
                 sell_turnover=round(sell_turnover, 4),
@@ -1140,6 +1527,8 @@ def backtest_trend_strategy(
                     regimes[code].market_label for code in target_codes if code in regimes and regimes[code].risk_on
                 ),
                 contributions=contributions,
+                exit_events=exit_events,
+                daily_path=daily_path,
             )
         )
         previous_holdings = current_holdings
@@ -1160,7 +1549,7 @@ def backtest_trend_strategy(
     average_cost_drag = sum(item.cost_drag for item in periods) / len(periods)
     average_period_return = sum(item.portfolio_return for item in periods) / len(periods)
     average_turnover = sum(item.turnover for item in periods) / len(periods)
-    daily_curve = build_daily_equity_curve(periods, histories, test_dates)
+    daily_curve = build_daily_equity_curve(periods)
     best_day, worst_day = summarize_daily_returns(daily_curve)
     return BacktestReport(
         market_label=market_label(market),
@@ -1184,6 +1573,7 @@ def backtest_trend_strategy(
         daily_curve=daily_curve,
         best_day=best_day,
         worst_day=worst_day,
+        exit_reason_counts=summarize_exit_reasons(periods),
         periods=tuple(periods),
         latest_snapshot=latest_snapshot,
     )
@@ -1230,6 +1620,7 @@ def format_trend_snapshot(
             f"- 现金缓冲: {snapshot.cash_weight * 100:.0f}%",
             f"- 单票上限: {snapshot.constraints.max_position_weight * 100:.0f}%",
             f"- 单行业上限: {snapshot.constraints.max_sector_weight * 100:.0f}% / 最多 {snapshot.constraints.max_sector_positions} 只",
+            f"- 退出规则: {exit_rule_summary(snapshot.exit_rules)}",
         ]
     )
     if snapshot.history_failures:
@@ -1285,13 +1676,20 @@ def format_trend_snapshot(
         lines.extend(["", "当前行业暴露"])
         for item in exposures:
             lines.append(f"- {item.sector}: {item.weight * 100:.0f}% ({item.count} 只)")
+    if snapshot.previous_rebalance_date is not None:
+        lines.extend(["", f"模型调仓清单（对比 {snapshot.previous_rebalance_date.isoformat()}）"])
+        if snapshot.trade_plan:
+            for item in snapshot.trade_plan[:6]:
+                lines.append(format_trade_plan_item(item))
+        else:
+            lines.append("- 与上一调仓日相比无变化")
     lines.extend(
         [
             "",
             "说明:",
             "- 市场过滤: 基准站上 MA120，且 MA20 > MA60 或 60D 趋势为正时才开仓。",
             "- 选股规则: 价格站上 MA60，MA20 > MA60 > MA120，且 20D/60D 动量均为正。",
-            "- 当前结果不含真实交易成本、涨跌停、停牌和点差处理。",
+            "- 退出规则在回测中按日生效，当前调仓清单按上一调仓日模型仓位推导。",
         ]
     )
     return "\n".join(lines)
@@ -1334,6 +1732,7 @@ def format_backtest_report(
         f"- 平均换手: {report.average_turnover * 100:.0f}%",
         f"- 成本假设: 佣金 {report.cost_model.commission_bps:.1f}bp | 滑点 {report.cost_model.slippage_bps:.1f}bp | A股卖出税 {report.cost_model.sell_tax_bps.get('CN', 0.0):.1f}bp",
         f"- 当前组合约束: 单票 {report.latest_snapshot.constraints.max_position_weight * 100:.0f}% | 单行业 {report.latest_snapshot.constraints.max_sector_weight * 100:.0f}% | 目标总仓位 {report.latest_snapshot.constraints.target_gross_exposure * 100:.0f}%",
+        f"- 退出规则: {exit_rule_summary(report.latest_snapshot.exit_rules)}",
     ]
     if report.history_failures:
         lines.append(f"- 历史数据抓取失败: {report.history_failures} 个标的已跳过")
@@ -1351,6 +1750,15 @@ def format_backtest_report(
                 lines.append(
                     f"  归因: 最强 {best.ticker} {best.contribution * 100:+.2f}% | 最弱 {worst.ticker} {worst.contribution * 100:+.2f}%"
                 )
+            if period.exit_events:
+                exit_summary = " / ".join(
+                    f"{item.ticker} {item.reason}" for item in period.exit_events[:2]
+                )
+                lines.append(f"  退出: {exit_summary}")
+    if report.exit_reason_counts:
+        lines.extend(["", "退出统计"])
+        for item in report.exit_reason_counts:
+            lines.append(f"- {item.reason}: {item.count} 次")
     if report.current_sector_exposures:
         lines.extend(["", "当前行业暴露"])
         for item in report.current_sector_exposures:
@@ -1379,6 +1787,13 @@ def format_backtest_report(
                 f"- 小仓位舍弃 {diagnostics.skipped_small_remainder} 只 | 部分仓位入选 {diagnostics.partial_weight_positions} 只",
             ]
         )
+    if report.latest_snapshot.previous_rebalance_date is not None:
+        lines.extend(["", f"最近一期调仓清单（对比 {report.latest_snapshot.previous_rebalance_date.isoformat()}）"])
+        if report.latest_snapshot.trade_plan:
+            for item in report.latest_snapshot.trade_plan[:6]:
+                lines.append(format_trade_plan_item(item))
+        else:
+            lines.append("- 最近一期模型仓位无变化")
     if report.daily_curve:
         lines.extend(["", "最近净值轨迹"])
         for point in report.daily_curve[-5:]:
@@ -1409,7 +1824,7 @@ def format_backtest_report(
             "注意:",
             "- 这是一版可执行 MVP，不是机构级回测引擎。",
             "- 当前回看仍有生存者偏差，因为候选池来自今天仍在库里的股票。",
-            "- 下一步最值得补的是真实财务因子、止损规则和交易清单导出。",
+            "- 下一步最值得补的是真实财务因子、分批建仓和实盘指令落地。",
         ]
     )
     return "\n".join(lines)
