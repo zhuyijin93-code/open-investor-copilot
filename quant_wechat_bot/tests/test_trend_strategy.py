@@ -145,6 +145,11 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertTrue(report.latest_snapshot.picks)
         self.assertGreater(report.average_cost_drag, 0)
         self.assertTrue(report.periods[-1].contributions)
+        self.assertTrue(report.current_sector_exposures)
+        self.assertTrue(report.daily_curve)
+        self.assertIsNotNone(report.best_day)
+        self.assertIsNotNone(report.worst_day)
+        self.assertGreaterEqual(report.average_invested_weight, 0)
 
     def test_backtest_cost_model_can_be_overridden_from_settings(self) -> None:
         with mock.patch(
@@ -161,6 +166,17 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertEqual(cost_model.commission_bps, 1.5)
         self.assertEqual(cost_model.slippage_bps, 4.0)
         self.assertEqual(cost_model.sell_tax_bps["CN"], 12.0)
+
+    def test_sector_exposure_summary_groups_weights(self) -> None:
+        picks = (
+            trend_strategy.TrendPick("A", "A.SS", "A", "科技", "A股", 100, 1, 0.25, 0, 0, 0, 0, 0, 10),
+            trend_strategy.TrendPick("B", "B.SS", "B", "科技", "A股", 100, 1, 0.25, 0, 0, 0, 0, 0, 10),
+            trend_strategy.TrendPick("C", "C.SS", "C", "消费", "A股", 100, 1, 0.20, 0, 0, 0, 0, 0, 10),
+        )
+        exposures = trend_strategy.summarize_sector_exposures(picks)
+        self.assertEqual(exposures[0].sector, "科技")
+        self.assertAlmostEqual(exposures[0].weight, 0.5)
+        self.assertEqual(exposures[0].count, 2)
 
 
 if __name__ == "__main__":

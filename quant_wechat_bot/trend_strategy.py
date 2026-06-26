@@ -95,6 +95,13 @@ class TrendSnapshot:
 
 
 @dataclasses.dataclass(frozen=True)
+class SectorExposure:
+    sector: str
+    weight: float
+    count: int
+
+
+@dataclasses.dataclass(frozen=True)
 class BacktestCostModel:
     commission_bps: float
     slippage_bps: float
@@ -108,6 +115,20 @@ class PeriodContribution:
     weight: float
     asset_return: float
     contribution: float
+
+
+@dataclasses.dataclass(frozen=True)
+class DailyEquityPoint:
+    session_date: dt.date
+    gross_value: float
+    net_value: float
+    drawdown: float
+
+
+@dataclasses.dataclass(frozen=True)
+class DailyReturnSummary:
+    session_date: dt.date
+    return_pct: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -140,10 +161,15 @@ class BacktestReport:
     annualized_return: float
     max_drawdown: float
     win_rate: float
+    average_invested_weight: float
     average_cost_drag: float
     average_period_return: float
     average_turnover: float
     cost_model: BacktestCostModel
+    current_sector_exposures: tuple[SectorExposure, ...]
+    daily_curve: tuple[DailyEquityPoint, ...]
+    best_day: DailyReturnSummary | None
+    worst_day: DailyReturnSummary | None
     periods: tuple[BacktestPeriod, ...]
     latest_snapshot: TrendSnapshot
 
@@ -242,6 +268,25 @@ def load_backtest_cost_model() -> BacktestCostModel:
         commission_bps=commission_bps,
         slippage_bps=slippage_bps,
         sell_tax_bps=sell_tax_bps,
+    )
+
+
+def summarize_sector_exposures(picks: tuple[TrendPick, ...] | list[TrendPick]) -> tuple[SectorExposure, ...]:
+    exposures: dict[str, SectorExposure] = {}
+    for item in picks:
+        current = exposures.get(item.sector)
+        if current is None:
+            exposures[item.sector] = SectorExposure(sector=item.sector, weight=item.weight, count=1)
+            continue
+        exposures[item.sector] = SectorExposure(
+            sector=item.sector,
+            weight=current.weight + item.weight,
+            count=current.count + 1,
+        )
+    ordered = sorted(exposures.values(), key=lambda item: (-item.weight, item.sector))
+    return tuple(
+        SectorExposure(sector=item.sector, weight=round(item.weight, 4), count=item.count)
+        for item in ordered
     )
 
 
@@ -722,6 +767,62 @@ def transaction_cost_drag(
     return buy_turnover, sell_turnover, cost_drag
 
 
+def build_daily_equity_curve(
+    periods: list[BacktestPeriod],
+    histories: dict[str, list[tuple[dt.date, float]]],
+    reference_dates: list[dt.date],
+) -> tuple[DailyEquityPoint, ...]:
+    curve: list[DailyEquityPoint] = []
+    gross_nav = 1.0
+    net_nav = 1.0
+    peak = 1.0
+    for period in periods:
+        gross_start = gross_nav
+        net_start = net_nav * (1.0 - period.cost_drag)
+        period_dates = [item for item in reference_dates if period.start_date < item <= period.end_date]
+        if not period_dates:
+            period_dates = [period.end_date]
+        for session_date in period_dates:
+            gross_return_to_date = period_return(period.holdings, histories, period.start_date, session_date)
+            gross_value = gross_start * (1.0 + gross_return_to_date)
+            net_value = net_start * (1.0 + gross_return_to_date)
+            peak = max(peak, net_value)
+            curve.append(
+                DailyEquityPoint(
+                    session_date=session_date,
+                    gross_value=round(gross_value, 6),
+                    net_value=round(net_value, 6),
+                    drawdown=round(net_value / peak - 1.0, 6),
+                )
+            )
+        gross_nav = gross_start * (1.0 + period.gross_return)
+        net_nav = net_start * (1.0 + period.gross_return)
+    return tuple(curve)
+
+
+def summarize_daily_returns(curve: tuple[DailyEquityPoint, ...]) -> tuple[DailyReturnSummary | None, DailyReturnSummary | None]:
+    if len(curve) < 2:
+        return None, None
+    daily_returns: list[DailyReturnSummary] = []
+    previous = curve[0]
+    for point in curve[1:]:
+        if previous.net_value <= 0:
+            previous = point
+            continue
+        daily_returns.append(
+            DailyReturnSummary(
+                session_date=point.session_date,
+                return_pct=point.net_value / previous.net_value - 1.0,
+            )
+        )
+        previous = point
+    if not daily_returns:
+        return None, None
+    best = max(daily_returns, key=lambda item: item.return_pct)
+    worst = min(daily_returns, key=lambda item: item.return_pct)
+    return best, worst
+
+
 def max_drawdown(equity_curve: list[float]) -> float:
     peak = 1.0
     worst = 0.0
@@ -823,9 +924,12 @@ def backtest_trend_strategy(
     calendar_days = max((periods[-1].end_date - periods[0].start_date).days, 1)
     annualized_return = (net_equity_curve[-1] ** (365.0 / calendar_days) - 1.0) if net_equity_curve[-1] > 0 else -1.0
     positive_periods = sum(1 for item in periods if item.portfolio_return > 0)
+    average_invested_weight = sum(item.invested_weight for item in periods) / len(periods)
     average_cost_drag = sum(item.cost_drag for item in periods) / len(periods)
     average_period_return = sum(item.portfolio_return for item in periods) / len(periods)
     average_turnover = sum(item.turnover for item in periods) / len(periods)
+    daily_curve = build_daily_equity_curve(periods, histories, test_dates)
+    best_day, worst_day = summarize_daily_returns(daily_curve)
     return BacktestReport(
         market_label=market_label(market),
         start_date=periods[0].start_date,
@@ -839,10 +943,15 @@ def backtest_trend_strategy(
         annualized_return=annualized_return,
         max_drawdown=max_drawdown(net_equity_curve),
         win_rate=positive_periods / len(periods),
+        average_invested_weight=average_invested_weight,
         average_cost_drag=average_cost_drag,
         average_period_return=average_period_return,
         average_turnover=average_turnover,
         cost_model=cost_model,
+        current_sector_exposures=summarize_sector_exposures(latest_snapshot.picks),
+        daily_curve=daily_curve,
+        best_day=best_day,
+        worst_day=worst_day,
         periods=tuple(periods),
         latest_snapshot=latest_snapshot,
     )
@@ -914,6 +1023,11 @@ def format_trend_snapshot(
         lines.append(
             f"   20D {item.ret20:+.1f}% | 60D {item.ret60:+.1f}% | 120D {item.ret120:+.1f}% | 相对基准 {item.relative_strength_60d:+.1f}%"
         )
+    exposures = summarize_sector_exposures(snapshot.picks)
+    if exposures:
+        lines.extend(["", "当前行业暴露"])
+        for item in exposures:
+            lines.append(f"- {item.sector}: {item.weight * 100:.0f}% ({item.count} 只)")
     lines.extend(
         [
             "",
@@ -957,6 +1071,7 @@ def format_backtest_report(
         f"- 年化收益: {report.annualized_return * 100:+.1f}%",
         f"- 最大回撤: {report.max_drawdown * 100:.1f}%",
         f"- 胜率: {report.win_rate * 100:.0f}%",
+        f"- 平均实盘仓位: {report.average_invested_weight * 100:.0f}%",
         f"- 平均单期成本: {report.average_cost_drag * 100:.2f}%",
         f"- 平均单期收益: {report.average_period_return * 100:+.2f}%",
         f"- 平均换手: {report.average_turnover * 100:.0f}%",
@@ -978,6 +1093,25 @@ def format_backtest_report(
                 lines.append(
                     f"  归因: 最强 {best.ticker} {best.contribution * 100:+.2f}% | 最弱 {worst.ticker} {worst.contribution * 100:+.2f}%"
                 )
+    if report.current_sector_exposures:
+        lines.extend(["", "当前行业暴露"])
+        for item in report.current_sector_exposures:
+            lines.append(f"- {item.sector}: {item.weight * 100:.0f}% ({item.count} 只)")
+    if report.daily_curve:
+        lines.extend(["", "最近净值轨迹"])
+        for point in report.daily_curve[-5:]:
+            lines.append(
+                f"- {point.session_date.isoformat()} | 净值 {point.net_value:.3f} | 回撤 {point.drawdown * 100:.1f}%"
+            )
+    if report.best_day is not None and report.worst_day is not None:
+        lines.extend(
+            [
+                "",
+                "单日表现",
+                f"- 最好一天: {report.best_day.session_date.isoformat()} {report.best_day.return_pct * 100:+.2f}%",
+                f"- 最差一天: {report.worst_day.session_date.isoformat()} {report.worst_day.return_pct * 100:+.2f}%",
+            ]
+        )
     latest = report.latest_snapshot
     lines.extend(["", "当前信号"])
     if latest.picks:
