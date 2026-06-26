@@ -95,6 +95,26 @@ class BotServiceTests(unittest.TestCase):
         self.assertEqual(reply.command, "close")
         self.assertEqual(reply.text, "digest output")
 
+    def test_trend_routes_to_trend_snapshot(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.build_trend_snapshot_text",
+            return_value="trend output",
+        ) as build_trend:
+            reply = bot_service.handle_message("趋势选股 A股 6")
+        build_trend.assert_called_once_with("A股", top_n=6)
+        self.assertEqual(reply.command, "trend")
+        self.assertEqual(reply.text, "trend output")
+
+    def test_backtest_routes_to_backtest_report(self) -> None:
+        with mock.patch(
+            "quant_wechat_bot.bot_service.build_backtest_report_text",
+            return_value="backtest output",
+        ) as build_backtest:
+            reply = bot_service.handle_message("趋势回测 美股 18")
+        build_backtest.assert_called_once_with("美股", months=18)
+        self.assertEqual(reply.command, "backtest")
+        self.assertEqual(reply.text, "backtest output")
+
     def test_default_market_is_used_when_configured(self) -> None:
         with (
             mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={"default_market": "A股"}),
@@ -125,6 +145,16 @@ class BotServiceTests(unittest.TestCase):
             mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_global_universe") as refresh,
         ):
             path = bot_service.resolve_universe_path("全市场")
+        self.assertEqual(path, bundled)
+        refresh.assert_not_called()
+
+    def test_trend_commands_prefer_bundled_snapshot_when_available(self) -> None:
+        bundled = PROJECT_ROOT / "universe_snapshots" / "us_share_snapshot.csv"
+        with (
+            mock.patch("quant_wechat_bot.bot_service.resolve_bundled_universe_path", return_value=bundled),
+            mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_us_share_universe") as refresh,
+        ):
+            path = bot_service.resolve_trend_universe_path("美股")
         self.assertEqual(path, bundled)
         refresh.assert_not_called()
 

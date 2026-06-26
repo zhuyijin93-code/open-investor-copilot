@@ -16,10 +16,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import data_sources, quant_engine
+    from . import data_sources, quant_engine, trend_strategy
 except ImportError:  # pragma: no cover - allows `python3 quant_wechat_bot/bot_service.py serve`
     import data_sources  # type: ignore
     import quant_engine  # type: ignore
+    import trend_strategy  # type: ignore
 
 
 DEFAULT_LOCAL_HOST = "127.0.0.1"
@@ -109,6 +110,8 @@ def help_text() -> str:
         16. 收盘总结 A股
         17. 收盘总结 港股
         18. 收盘总结 美股
+        19. 趋势选股 A股
+        20. 趋势回测 A股 12
 
         Slash commands:
         - /help
@@ -117,6 +120,8 @@ def help_text() -> str:
         - /score <ticker> [market]
         - /universe [market]
         - /close [market]
+        - /trend [market] [top_n]
+        - /backtest [market] [months]
 
         提醒:
         - `样本池` 是仓库自带的小样本
@@ -360,6 +365,37 @@ def build_close_digest_text(market: str | None = None) -> str:
     return truncate_reply(digest)
 
 
+def resolve_trend_universe_path(market: str | None = None) -> Path:
+    effective_market = market if market is not None else resolve_default_market()
+    bundled = resolve_bundled_universe_path(normalize_market(effective_market))
+    if bundled is not None:
+        return bundled
+    return resolve_universe_path(effective_market)
+
+
+def build_trend_snapshot_text(market: str | None = None, top_n: int = 5) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return truncate_reply(
+        trend_strategy.format_trend_snapshot(
+            resolve_trend_universe_path(effective_market),
+            effective_market,
+            top_n=top_n,
+        )
+    )
+
+
+def build_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return truncate_reply(
+        trend_strategy.format_backtest_report(
+            resolve_trend_universe_path(effective_market),
+            effective_market,
+            lookback_months=months,
+            top_n=top_n,
+        )
+    )
+
+
 def dispatch_message(message: str) -> BotReply:
     normalized = normalize_message(message)
     lowered = normalized.lower()
@@ -380,6 +416,16 @@ def dispatch_message(message: str) -> BotReply:
     close_match = re.match(r"^(?:/close|收盘总结|盘后总结|盘后|收盘)(?:\s+([^\s]+))?$", normalized, re.I)
     if close_match:
         return BotReply(build_close_digest_text(close_match.group(1)), "close")
+
+    trend_match = re.match(r"^(?:/trend|趋势选股|趋势)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
+    if trend_match:
+        top_n = int(trend_match.group(2) or "5")
+        return BotReply(build_trend_snapshot_text(trend_match.group(1), top_n=top_n), "trend")
+
+    backtest_match = re.match(r"^(?:/backtest|趋势回测|回测)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
+    if backtest_match:
+        months = int(backtest_match.group(2) or "12")
+        return BotReply(build_backtest_report_text(backtest_match.group(1), months=months), "backtest")
 
     pick_match = re.match(r"^/(?:pick)\s+([^\s]+)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
     if pick_match:
@@ -413,7 +459,7 @@ def dispatch_message(message: str) -> BotReply:
         return BotReply(build_screen_text("defensive"), "pick")
 
     return BotReply(
-        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 选股 质量 全市场\n- 选股 动量 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
+        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
         "help",
     )
 
@@ -428,7 +474,7 @@ def handle_message(message: str) -> BotReply:
         elif "Ticker" in str(exc):
             hint = "\n\n提示: 先发送 `股票池`、`股票池 港股`、`股票池 美股` 或 `股票池 全市场` 看当前股票池里有哪些代码。"
         elif "urlopen error" in str(exc).lower() or "timed out" in str(exc).lower() or "eastmoney" in str(exc).lower() or "sina" in str(exc).lower():
-            hint = "\n\n提示: 全量股票池需要联网拉取免费行情快照。你也可以先试 `选股 质量 样本`。"
+            hint = "\n\n提示: 全量股票池和趋势回测都需要联网拉取免费行情数据。你也可以先试 `选股 质量 样本`。"
         return BotReply(
             f"Request failed: {exc}{hint}\n\n试试 `帮助` 查看支持的命令。",
             "error",
