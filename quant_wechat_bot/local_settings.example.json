@@ -15,6 +15,17 @@
       "US": 0
     }
   },
+  "trend_portfolio_constraints": {
+    "max_position_weight": 0.25,
+    "max_sector_positions": 2,
+    "max_sector_weight": 0.35,
+    "target_gross_exposure": 1.0,
+    "market_weight_budget": {
+      "CN": 0.34,
+      "HK": 0.33,
+      "US": 0.33
+    }
+  },
   "close_digest_watchlists": {
     "A股": ["600519.SS", "300750.SZ"],
     "HK": ["0700.HK", "9988.HK", "3690.HK"],

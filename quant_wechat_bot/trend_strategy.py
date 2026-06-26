@@ -26,6 +26,9 @@ REBALANCE_DAYS = 20
 DEFAULT_TOP_N = 5
 MAX_POSITION_WEIGHT = 0.25
 MAX_SECTOR_POSITIONS = 2
+MAX_SECTOR_WEIGHT = 0.35
+TARGET_GROSS_EXPOSURE = 1.0
+MIN_POSITION_WEIGHT = 0.02
 MAX_WORKERS = 6
 DEFAULT_COMMISSION_BPS = 2.0
 DEFAULT_SLIPPAGE_BPS = 8.0
@@ -91,6 +94,9 @@ class TrendSnapshot:
     invested_weight: float
     cash_weight: float
     regimes: tuple[RegimeSnapshot, ...]
+    constraints: PortfolioConstraints
+    market_exposures: tuple[MarketExposure, ...]
+    constraint_diagnostics: ConstraintDiagnostics
     picks: tuple[TrendPick, ...]
 
 
@@ -102,10 +108,37 @@ class SectorExposure:
 
 
 @dataclasses.dataclass(frozen=True)
+class MarketExposure:
+    market_code: str
+    market_label: str
+    target_weight: float
+    actual_weight: float
+    count: int
+
+
+@dataclasses.dataclass(frozen=True)
 class BacktestCostModel:
     commission_bps: float
     slippage_bps: float
     sell_tax_bps: dict[str, float]
+
+
+@dataclasses.dataclass(frozen=True)
+class PortfolioConstraints:
+    max_position_weight: float
+    max_sector_positions: int
+    max_sector_weight: float
+    target_gross_exposure: float
+    market_weight_budget: dict[str, float]
+
+
+@dataclasses.dataclass(frozen=True)
+class ConstraintDiagnostics:
+    skipped_sector_position_limit: int = 0
+    skipped_sector_weight_limit: int = 0
+    skipped_market_budget_limit: int = 0
+    skipped_small_remainder: int = 0
+    partial_weight_positions: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -271,6 +304,78 @@ def load_backtest_cost_model() -> BacktestCostModel:
     )
 
 
+def clamp_weight(value: object, default: float) -> float:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return min(max(float(value), 0.0), 1.0)
+    return default
+
+
+def resolve_market_weight_budget(
+    target_codes: tuple[str, ...],
+    configured: Mapping[str, object] | None,
+) -> dict[str, float]:
+    if not target_codes:
+        return {}
+    if len(target_codes) == 1:
+        return {target_codes[0]: 1.0}
+
+    explicit: dict[str, float] = {}
+    if configured is not None:
+        for key, value in configured.items():
+            if not isinstance(key, str):
+                continue
+            code = key.strip().upper()
+            if code not in target_codes or not isinstance(value, (int, float)):
+                continue
+            explicit[code] = min(max(float(value), 0.0), 1.0)
+
+    explicit_sum = sum(explicit.values())
+    if explicit_sum >= 1.0:
+        if explicit_sum <= 0:
+            return {code: 0.0 for code in target_codes}
+        return {code: explicit.get(code, 0.0) / explicit_sum for code in target_codes}
+
+    remaining_codes = [code for code in target_codes if code not in explicit]
+    remaining_budget = max(0.0, 1.0 - explicit_sum)
+    fill_weight = remaining_budget / len(remaining_codes) if remaining_codes else 0.0
+    return {code: explicit.get(code, fill_weight) for code in target_codes}
+
+
+def load_portfolio_constraints(target_codes: tuple[str, ...]) -> PortfolioConstraints:
+    settings = market_close_digest.load_settings()
+    payload = settings.get("trend_portfolio_constraints")
+    max_position_weight = MAX_POSITION_WEIGHT
+    max_sector_positions = MAX_SECTOR_POSITIONS
+    max_sector_weight = MAX_SECTOR_WEIGHT
+    target_gross_exposure = TARGET_GROSS_EXPOSURE
+    market_weight_budget = resolve_market_weight_budget(target_codes, None)
+
+    if isinstance(payload, Mapping):
+        max_position_weight = clamp_weight(payload.get("max_position_weight"), max_position_weight)
+        raw_sector_positions = payload.get("max_sector_positions")
+        if isinstance(raw_sector_positions, int) and raw_sector_positions > 0:
+            max_sector_positions = raw_sector_positions
+        max_sector_weight = clamp_weight(payload.get("max_sector_weight"), max_sector_weight)
+        target_gross_exposure = clamp_weight(payload.get("target_gross_exposure"), target_gross_exposure)
+        raw_market_budget = payload.get("market_weight_budget")
+        market_weight_budget = resolve_market_weight_budget(
+            target_codes,
+            raw_market_budget if isinstance(raw_market_budget, Mapping) else None,
+        )
+
+    max_position_weight = max(max_position_weight, MIN_POSITION_WEIGHT)
+    max_sector_weight = max(max_sector_weight, max_position_weight)
+    target_gross_exposure = max(target_gross_exposure, MIN_POSITION_WEIGHT)
+
+    return PortfolioConstraints(
+        max_position_weight=max_position_weight,
+        max_sector_positions=max_sector_positions,
+        max_sector_weight=max_sector_weight,
+        target_gross_exposure=target_gross_exposure,
+        market_weight_budget=market_weight_budget,
+    )
+
+
 def summarize_sector_exposures(picks: tuple[TrendPick, ...] | list[TrendPick]) -> tuple[SectorExposure, ...]:
     exposures: dict[str, SectorExposure] = {}
     for item in picks:
@@ -286,6 +391,58 @@ def summarize_sector_exposures(picks: tuple[TrendPick, ...] | list[TrendPick]) -
     ordered = sorted(exposures.values(), key=lambda item: (-item.weight, item.sector))
     return tuple(
         SectorExposure(sector=item.sector, weight=round(item.weight, 4), count=item.count)
+        for item in ordered
+    )
+
+
+def summarize_market_exposures(
+    picks: tuple[TrendPick, ...] | list[TrendPick],
+    constraints: PortfolioConstraints,
+) -> tuple[MarketExposure, ...]:
+    exposures: dict[str, MarketExposure] = {}
+    for code, target_weight in constraints.market_weight_budget.items():
+        exposures[code] = MarketExposure(
+            market_code=code,
+            market_label=UNIVERSE_CONFIGS[code].label,
+            target_weight=target_weight,
+            actual_weight=0.0,
+            count=0,
+        )
+    for item in picks:
+        code = infer_market_code(item.ticker)
+        current = exposures.get(code)
+        if current is None:
+            exposures[code] = MarketExposure(
+                market_code=code,
+                market_label=UNIVERSE_CONFIGS[code].label,
+                target_weight=0.0,
+                actual_weight=item.weight,
+                count=1,
+            )
+            continue
+        exposures[code] = MarketExposure(
+            market_code=code,
+            market_label=current.market_label,
+            target_weight=current.target_weight,
+            actual_weight=current.actual_weight + item.weight,
+            count=current.count + 1,
+        )
+    ordered = []
+    for code in constraints.market_weight_budget:
+        exposure = exposures.get(code)
+        if exposure is not None:
+            ordered.append(exposure)
+    for code, exposure in exposures.items():
+        if code not in constraints.market_weight_budget:
+            ordered.append(exposure)
+    return tuple(
+        MarketExposure(
+            market_code=item.market_code,
+            market_label=item.market_label,
+            target_weight=round(item.target_weight, 4),
+            actual_weight=round(item.actual_weight, 4),
+            count=item.count,
+        )
         for item in ordered
     )
 
@@ -586,9 +743,9 @@ def select_picks(
     as_of: dt.date,
     *,
     top_n: int,
-    max_sector_positions: int = MAX_SECTOR_POSITIONS,
-    max_position_weight: float = MAX_POSITION_WEIGHT,
-) -> tuple[list[TrendPick], int]:
+    constraints: PortfolioConstraints | None = None,
+) -> tuple[list[TrendPick], int, ConstraintDiagnostics]:
+    active_constraints = constraints or load_portfolio_constraints(tuple(regimes))
     ranked: list[TrendPick] = []
     evaluated = 0
     for row in rows:
@@ -629,18 +786,71 @@ def select_picks(
     ranked.sort(key=lambda item: (-item.score, -item.relative_strength_60d, item.ticker))
     selected: list[TrendPick] = []
     sector_counts: dict[str, int] = {}
+    sector_weights: dict[str, float] = {}
+    market_weights = {code: 0.0 for code in active_constraints.market_weight_budget}
+    diagnostics = ConstraintDiagnostics()
+    remaining_weight = active_constraints.target_gross_exposure
+    desired_weight = min(
+        active_constraints.max_position_weight,
+        active_constraints.target_gross_exposure / max(top_n, 1),
+    )
+    minimum_weight = min(desired_weight, max(MIN_POSITION_WEIGHT, desired_weight * 0.25))
     for item in ranked:
-        if sector_counts.get(item.sector, 0) >= max_sector_positions:
-            continue
-        selected.append(item)
-        sector_counts[item.sector] = sector_counts.get(item.sector, 0) + 1
-        if len(selected) >= top_n:
+        if len(selected) >= top_n or remaining_weight <= 0:
             break
+        if sector_counts.get(item.sector, 0) >= active_constraints.max_sector_positions:
+            diagnostics = dataclasses.replace(
+                diagnostics,
+                skipped_sector_position_limit=diagnostics.skipped_sector_position_limit + 1,
+            )
+            continue
+        code = infer_market_code(item.ticker)
+        sector_room = active_constraints.max_sector_weight - sector_weights.get(item.sector, 0.0)
+        market_room = active_constraints.market_weight_budget.get(code, 1.0) - market_weights.get(code, 0.0)
+        if sector_room <= 0:
+            diagnostics = dataclasses.replace(
+                diagnostics,
+                skipped_sector_weight_limit=diagnostics.skipped_sector_weight_limit + 1,
+            )
+            continue
+        if market_room <= 0:
+            diagnostics = dataclasses.replace(
+                diagnostics,
+                skipped_market_budget_limit=diagnostics.skipped_market_budget_limit + 1,
+            )
+            continue
+        weight = min(desired_weight, remaining_weight, sector_room, market_room)
+        if weight < minimum_weight:
+            if sector_room < minimum_weight:
+                diagnostics = dataclasses.replace(
+                    diagnostics,
+                    skipped_sector_weight_limit=diagnostics.skipped_sector_weight_limit + 1,
+                )
+            elif market_room < minimum_weight:
+                diagnostics = dataclasses.replace(
+                    diagnostics,
+                    skipped_market_budget_limit=diagnostics.skipped_market_budget_limit + 1,
+                )
+            else:
+                diagnostics = dataclasses.replace(
+                    diagnostics,
+                    skipped_small_remainder=diagnostics.skipped_small_remainder + 1,
+                )
+            continue
+        rounded_weight = round(weight, 4)
+        if rounded_weight < desired_weight:
+            diagnostics = dataclasses.replace(
+                diagnostics,
+                partial_weight_positions=diagnostics.partial_weight_positions + 1,
+            )
+        selected.append(dataclasses.replace(item, weight=rounded_weight))
+        sector_counts[item.sector] = sector_counts.get(item.sector, 0) + 1
+        sector_weights[item.sector] = sector_weights.get(item.sector, 0.0) + rounded_weight
+        market_weights[code] = market_weights.get(code, 0.0) + rounded_weight
+        remaining_weight = max(0.0, remaining_weight - rounded_weight)
     if not selected:
-        return [], evaluated
-    target_weight = min(1.0 / len(selected), max_position_weight)
-    weighted = [dataclasses.replace(item, weight=round(target_weight, 4)) for item in selected]
-    return weighted, evaluated
+        return [], evaluated, diagnostics
+    return selected, evaluated, diagnostics
 
 
 def build_trend_snapshot(
@@ -650,11 +860,13 @@ def build_trend_snapshot(
     top_n: int = DEFAULT_TOP_N,
     as_of: dt.date | None = None,
     history_fetcher: HistoryFetcher | None = None,
+    constraints: PortfolioConstraints | None = None,
 ) -> TrendSnapshot:
     rows = load_candidate_rows(universe_path, market)
     if not rows:
         raise RuntimeError("No liquid large-cap candidates passed the initial market filters.")
     target_codes = resolve_market_codes(market)
+    active_constraints = constraints or load_portfolio_constraints(target_codes)
     effective_as_of = as_of or dt.date.today()
     benchmark_histories, benchmark_failures = load_histories(
         [UNIVERSE_CONFIGS[code].benchmark_symbol for code in target_codes],
@@ -671,12 +883,13 @@ def build_trend_snapshot(
     history_symbols = [history_symbol_for_ticker(str(row["ticker"])) for row in rows]
     stock_histories, stock_failures = load_histories(history_symbols, history_fetcher=history_fetcher)
     merged_histories = {**benchmark_histories, **stock_histories}
-    picks, evaluated_count = select_picks(
+    picks, evaluated_count, constraint_diagnostics = select_picks(
         rows,
         merged_histories,
         regimes,
         effective_as_of,
         top_n=top_n,
+        constraints=active_constraints,
     )
     invested_weight = round(sum(item.weight for item in picks), 4)
     return TrendSnapshot(
@@ -688,6 +901,9 @@ def build_trend_snapshot(
         invested_weight=invested_weight,
         cash_weight=round(max(0.0, 1.0 - invested_weight), 4),
         regimes=tuple(regimes[code] for code in target_codes if code in regimes),
+        constraints=active_constraints,
+        market_exposures=summarize_market_exposures(picks, active_constraints),
+        constraint_diagnostics=constraint_diagnostics,
         picks=tuple(picks),
     )
 
@@ -758,12 +974,25 @@ def transaction_cost_drag(
     current: tuple[TrendPick, ...],
     cost_model: BacktestCostModel,
 ) -> tuple[float, float, float]:
-    buy_turnover, sell_turnover = turnover_breakdown(previous, current)
+    previous_weights = {item.ticker: item.weight for item in previous}
+    current_weights = {item.ticker: item.weight for item in current}
+    tickers = set(previous_weights) | set(current_weights)
+    buy_turnover = 0.0
+    sell_turnover = 0.0
     buy_cost_bps = cost_model.commission_bps + cost_model.slippage_bps
-    inferred_market_code = infer_market_code(current[0].ticker) if current else infer_market_code(previous[0].ticker) if previous else "US"
-    sell_tax_bps = cost_model.sell_tax_bps.get(inferred_market_code, 0.0)
-    sell_cost_bps = cost_model.commission_bps + cost_model.slippage_bps + sell_tax_bps
-    cost_drag = buy_turnover * buy_cost_bps / 10000.0 + sell_turnover * sell_cost_bps / 10000.0
+    cost_drag = 0.0
+    for ticker in tickers:
+        delta = current_weights.get(ticker, 0.0) - previous_weights.get(ticker, 0.0)
+        if delta > 0:
+            buy_turnover += delta
+            cost_drag += delta * buy_cost_bps / 10000.0
+            continue
+        if delta >= 0:
+            continue
+        sell_weight = -delta
+        sell_turnover += sell_weight
+        sell_tax_bps = cost_model.sell_tax_bps.get(infer_market_code(ticker), 0.0)
+        cost_drag += sell_weight * (buy_cost_bps + sell_tax_bps) / 10000.0
     return buy_turnover, sell_turnover, cost_drag
 
 
@@ -847,6 +1076,7 @@ def backtest_trend_strategy(
     if not rows:
         raise RuntimeError("No liquid large-cap candidates passed the initial market filters.")
     target_codes = resolve_market_codes(market)
+    constraints = load_portfolio_constraints(target_codes)
     benchmark_symbols = [UNIVERSE_CONFIGS[code].benchmark_symbol for code in target_codes]
     stock_symbols = [history_symbol_for_ticker(str(row["ticker"])) for row in rows]
     histories, failures = load_histories(benchmark_symbols + stock_symbols, history_fetcher=history_fetcher)
@@ -879,12 +1109,13 @@ def backtest_trend_strategy(
             regime = evaluate_regime(code, histories[UNIVERSE_CONFIGS[code].benchmark_symbol], start_date)
             if regime is not None:
                 regimes[code] = regime
-        holdings, evaluated_count = select_picks(
+        holdings, evaluated_count, _ = select_picks(
             rows,
             histories,
             regimes,
             start_date,
             top_n=top_n,
+            constraints=constraints,
         )
         current_holdings = tuple(holdings)
         contributions = period_contributions(current_holdings, histories, start_date, end_date)
@@ -918,6 +1149,7 @@ def backtest_trend_strategy(
         top_n=top_n,
         as_of=rebalance_dates[-1],
         history_fetcher=history_fetcher,
+        constraints=constraints,
     )
     gross_total_return = gross_equity_curve[-1] - 1.0
     total_return = net_equity_curve[-1] - 1.0
@@ -993,14 +1225,39 @@ def format_trend_snapshot(
         [
             "",
             "仓位建议",
-            f"- 目标持仓: {snapshot.invested_weight * 100:.0f}%",
+            f"- 目标持仓: {snapshot.constraints.target_gross_exposure * 100:.0f}%",
+            f"- 实际持仓: {snapshot.invested_weight * 100:.0f}%",
             f"- 现金缓冲: {snapshot.cash_weight * 100:.0f}%",
-            f"- 单票上限: {MAX_POSITION_WEIGHT * 100:.0f}%",
-            f"- 同行业最多 {MAX_SECTOR_POSITIONS} 只",
+            f"- 单票上限: {snapshot.constraints.max_position_weight * 100:.0f}%",
+            f"- 单行业上限: {snapshot.constraints.max_sector_weight * 100:.0f}% / 最多 {snapshot.constraints.max_sector_positions} 只",
         ]
     )
     if snapshot.history_failures:
         lines.append(f"- 历史数据抓取失败 {snapshot.history_failures} 个标的，已自动跳过")
+    if snapshot.market_exposures:
+        lines.extend(["", "市场预算"])
+        for item in snapshot.market_exposures:
+            lines.append(
+                f"- {item.market_label}: 目标 {item.target_weight * 100:.0f}% | 实际 {item.actual_weight * 100:.0f}% ({item.count} 只)"
+            )
+    diagnostics = snapshot.constraint_diagnostics
+    if any(
+        (
+            diagnostics.skipped_sector_position_limit,
+            diagnostics.skipped_sector_weight_limit,
+            diagnostics.skipped_market_budget_limit,
+            diagnostics.skipped_small_remainder,
+            diagnostics.partial_weight_positions,
+        )
+    ):
+        lines.extend(
+            [
+                "",
+                "约束执行",
+                f"- 行业名额跳过 {diagnostics.skipped_sector_position_limit} 只 | 行业权重跳过 {diagnostics.skipped_sector_weight_limit} 只 | 市场预算跳过 {diagnostics.skipped_market_budget_limit} 只",
+                f"- 小仓位舍弃 {diagnostics.skipped_small_remainder} 只 | 部分仓位入选 {diagnostics.partial_weight_positions} 只",
+            ]
+        )
     if not snapshot.picks:
         lines.extend(
             [
@@ -1076,6 +1333,7 @@ def format_backtest_report(
         f"- 平均单期收益: {report.average_period_return * 100:+.2f}%",
         f"- 平均换手: {report.average_turnover * 100:.0f}%",
         f"- 成本假设: 佣金 {report.cost_model.commission_bps:.1f}bp | 滑点 {report.cost_model.slippage_bps:.1f}bp | A股卖出税 {report.cost_model.sell_tax_bps.get('CN', 0.0):.1f}bp",
+        f"- 当前组合约束: 单票 {report.latest_snapshot.constraints.max_position_weight * 100:.0f}% | 单行业 {report.latest_snapshot.constraints.max_sector_weight * 100:.0f}% | 目标总仓位 {report.latest_snapshot.constraints.target_gross_exposure * 100:.0f}%",
     ]
     if report.history_failures:
         lines.append(f"- 历史数据抓取失败: {report.history_failures} 个标的已跳过")
@@ -1097,6 +1355,30 @@ def format_backtest_report(
         lines.extend(["", "当前行业暴露"])
         for item in report.current_sector_exposures:
             lines.append(f"- {item.sector}: {item.weight * 100:.0f}% ({item.count} 只)")
+    if report.latest_snapshot.market_exposures:
+        lines.extend(["", "当前市场分配"])
+        for item in report.latest_snapshot.market_exposures:
+            lines.append(
+                f"- {item.market_label}: 目标 {item.target_weight * 100:.0f}% | 实际 {item.actual_weight * 100:.0f}% ({item.count} 只)"
+            )
+    diagnostics = report.latest_snapshot.constraint_diagnostics
+    if any(
+        (
+            diagnostics.skipped_sector_position_limit,
+            diagnostics.skipped_sector_weight_limit,
+            diagnostics.skipped_market_budget_limit,
+            diagnostics.skipped_small_remainder,
+            diagnostics.partial_weight_positions,
+        )
+    ):
+        lines.extend(
+            [
+                "",
+                "当前约束命中",
+                f"- 行业名额跳过 {diagnostics.skipped_sector_position_limit} 只 | 行业权重跳过 {diagnostics.skipped_sector_weight_limit} 只 | 市场预算跳过 {diagnostics.skipped_market_budget_limit} 只",
+                f"- 小仓位舍弃 {diagnostics.skipped_small_remainder} 只 | 部分仓位入选 {diagnostics.partial_weight_positions} 只",
+            ]
+        )
     if report.daily_curve:
         lines.extend(["", "最近净值轨迹"])
         for point in report.daily_curve[-5:]:
@@ -1127,7 +1409,7 @@ def format_backtest_report(
             "注意:",
             "- 这是一版可执行 MVP，不是机构级回测引擎。",
             "- 当前回看仍有生存者偏差，因为候选池来自今天仍在库里的股票。",
-            "- 下一步最值得补的是真实财务因子、行业暴露约束和逐日净值曲线导出。",
+            "- 下一步最值得补的是真实财务因子、止损规则和交易清单导出。",
         ]
     )
     return "\n".join(lines)

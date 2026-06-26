@@ -32,61 +32,41 @@ def build_series(start_price: float, slope: float, days: int = 320) -> list[tupl
     return [(base + dt.timedelta(days=index), start_price + slope * index) for index in range(days)]
 
 
+def build_row(ticker: str, name: str, sector: str, price: float, market_cap_b: float) -> dict[str, str]:
+    return {
+        "ticker": ticker,
+        "name": name,
+        "sector": sector,
+        "price": f"{price:.1f}",
+        "market_cap_b": f"{market_cap_b:.1f}",
+        "pe": "20.0",
+        "pb": "4.0",
+        "roe": "0.0",
+        "revenue_growth": "0.0",
+        "momentum_20d": "0.0",
+        "momentum_60d": "0.0",
+        "volatility_20d": "0.0",
+        "dividend_yield": "0.0",
+    }
+
+
+def write_universe_csv(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 class TrendStrategyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.universe_path = Path(self.temp_dir.name) / "universe.csv"
         rows = [
-            {
-                "ticker": "600519",
-                "name": "Alpha",
-                "sector": "消费",
-                "price": "120.0",
-                "market_cap_b": "180.0",
-                "pe": "20.0",
-                "pb": "4.0",
-                "roe": "0.0",
-                "revenue_growth": "0.0",
-                "momentum_20d": "0.0",
-                "momentum_60d": "0.0",
-                "volatility_20d": "0.0",
-                "dividend_yield": "0.0",
-            },
-            {
-                "ticker": "000333",
-                "name": "Bravo",
-                "sector": "家电",
-                "price": "80.0",
-                "market_cap_b": "150.0",
-                "pe": "18.0",
-                "pb": "3.0",
-                "roe": "0.0",
-                "revenue_growth": "0.0",
-                "momentum_20d": "0.0",
-                "momentum_60d": "0.0",
-                "volatility_20d": "0.0",
-                "dividend_yield": "0.0",
-            },
-            {
-                "ticker": "300750",
-                "name": "Charlie",
-                "sector": "新能源",
-                "price": "45.0",
-                "market_cap_b": "130.0",
-                "pe": "22.0",
-                "pb": "5.0",
-                "roe": "0.0",
-                "revenue_growth": "0.0",
-                "momentum_20d": "0.0",
-                "momentum_60d": "0.0",
-                "volatility_20d": "0.0",
-                "dividend_yield": "0.0",
-            },
+            build_row("600519", "Alpha", "消费", 120.0, 180.0),
+            build_row("000333", "Bravo", "家电", 80.0, 150.0),
+            build_row("300750", "Charlie", "新能源", 45.0, 130.0),
         ]
-        with self.universe_path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=CSV_FIELDS)
-            writer.writeheader()
-            writer.writerows(rows)
+        write_universe_csv(self.universe_path, rows)
         self.histories = {
             "000300.SS": build_series(100.0, 0.25),
             "600519.SS": build_series(50.0, 0.55),
@@ -166,6 +146,113 @@ class TrendStrategyTests(unittest.TestCase):
         self.assertEqual(cost_model.commission_bps, 1.5)
         self.assertEqual(cost_model.slippage_bps, 4.0)
         self.assertEqual(cost_model.sell_tax_bps["CN"], 12.0)
+
+    def test_build_trend_snapshot_enforces_sector_weight_cap(self) -> None:
+        sector_path = Path(self.temp_dir.name) / "sector_cap.csv"
+        write_universe_csv(
+            sector_path,
+            [
+                build_row("600519", "Alpha", "科技", 120.0, 180.0),
+                build_row("000333", "Bravo", "科技", 80.0, 150.0),
+                build_row("300750", "Charlie", "工业", 60.0, 130.0),
+            ],
+        )
+        histories = {
+            "000300.SS": build_series(100.0, 0.25),
+            "600519.SS": build_series(50.0, 0.65),
+            "000333.SZ": build_series(48.0, 0.63),
+            "300750.SZ": build_series(45.0, 0.55),
+        }
+        with mock.patch(
+            "quant_wechat_bot.trend_strategy.market_close_digest.load_settings",
+            return_value={
+                "trend_portfolio_constraints": {
+                    "max_position_weight": 0.25,
+                    "max_sector_positions": 2,
+                    "max_sector_weight": 0.35,
+                    "target_gross_exposure": 0.75,
+                }
+            },
+        ):
+            snapshot = trend_strategy.build_trend_snapshot(
+                sector_path,
+                "A股",
+                top_n=3,
+                history_fetcher=histories.__getitem__,
+            )
+        tech_weight = sum(item.weight for item in snapshot.picks if item.sector == "科技")
+        self.assertAlmostEqual(tech_weight, 0.35, places=3)
+        self.assertAlmostEqual(snapshot.invested_weight, 0.60, places=3)
+        self.assertEqual(snapshot.constraint_diagnostics.partial_weight_positions, 1)
+
+    def test_build_trend_snapshot_enforces_market_budget_for_global_market(self) -> None:
+        global_path = Path(self.temp_dir.name) / "global.csv"
+        write_universe_csv(
+            global_path,
+            [
+                build_row("600519", "Kweichow", "消费", 120.0, 180.0),
+                build_row("00700.HK", "Tencent", "互联网", 380.0, 350.0),
+                build_row("NVDA", "Nvidia", "半导体", 900.0, 1200.0),
+                build_row("MSFT", "Microsoft", "软件", 430.0, 1100.0),
+                build_row("AAPL", "Apple", "硬件", 210.0, 1000.0),
+                build_row("AMZN", "Amazon", "电商", 180.0, 950.0),
+            ],
+        )
+        histories = {
+            "000300.SS": build_series(100.0, 0.25),
+            "^HSI": build_series(18000.0, 15.0),
+            "SPY": build_series(400.0, 0.8),
+            "600519.SS": build_series(50.0, 0.65),
+            "00700.HK": build_series(200.0, 0.60),
+            "NVDA": build_series(300.0, 2.10),
+            "MSFT": build_series(250.0, 1.80),
+            "AAPL": build_series(180.0, 1.60),
+            "AMZN": build_series(160.0, 1.40),
+        }
+        with mock.patch(
+            "quant_wechat_bot.trend_strategy.market_close_digest.load_settings",
+            return_value={
+                "trend_portfolio_constraints": {
+                    "max_position_weight": 0.25,
+                    "max_sector_positions": 5,
+                    "max_sector_weight": 1.0,
+                    "target_gross_exposure": 1.0,
+                    "market_weight_budget": {
+                        "CN": 0.2,
+                        "HK": 0.2,
+                        "US": 0.6,
+                    },
+                }
+            },
+        ):
+            snapshot = trend_strategy.build_trend_snapshot(
+                global_path,
+                "全市场",
+                top_n=5,
+                history_fetcher=histories.__getitem__,
+            )
+        exposure_map = {item.market_code: item for item in snapshot.market_exposures}
+        self.assertAlmostEqual(exposure_map["CN"].actual_weight, 0.2, places=3)
+        self.assertAlmostEqual(exposure_map["HK"].actual_weight, 0.2, places=3)
+        self.assertAlmostEqual(exposure_map["US"].actual_weight, 0.6, places=3)
+        self.assertEqual(exposure_map["US"].count, 3)
+        self.assertGreater(snapshot.constraint_diagnostics.skipped_market_budget_limit, 0)
+        self.assertAlmostEqual(snapshot.invested_weight, 1.0, places=3)
+
+    def test_transaction_cost_drag_uses_market_specific_sell_tax(self) -> None:
+        cost_model = trend_strategy.BacktestCostModel(
+            commission_bps=2.0,
+            slippage_bps=8.0,
+            sell_tax_bps={"CN": 10.0, "US": 0.0},
+        )
+        previous = (
+            trend_strategy.TrendPick("600519", "600519.SS", "Alpha", "消费", "A股", 100, 1, 0.20, 0, 0, 0, 0, 0, 10),
+            trend_strategy.TrendPick("NVDA", "NVDA", "Nvidia", "半导体", "美股", 100, 1, 0.20, 0, 0, 0, 0, 0, 10),
+        )
+        buy_turnover, sell_turnover, cost_drag = trend_strategy.transaction_cost_drag(previous, tuple(), cost_model)
+        self.assertAlmostEqual(buy_turnover, 0.0, places=4)
+        self.assertAlmostEqual(sell_turnover, 0.4, places=4)
+        self.assertAlmostEqual(cost_drag, 0.0006, places=6)
 
     def test_sector_exposure_summary_groups_weights(self) -> None:
         picks = (
