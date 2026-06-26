@@ -89,6 +89,8 @@ Try:
 - `推荐日报 全市场 3`
 - `推荐日报 A股 3`
 - `每日推荐 美股 3`
+- `周复盘 全市场 5 6`
+- `周报 A股 3 6`
 
 Slash commands also work:
 
@@ -101,6 +103,7 @@ Slash commands also work:
 - `/universe A股`
 - `/close A股`
 - `/ideas 全市场 3`
+- `/weekly 全市场 5 6`
 
 ## Larger Universe
 
@@ -339,6 +342,7 @@ Send to your personal WeChat:
 ```bash
 python3 -m quant_wechat_bot.recommendation_digest send --market 全市场 --top-n 3
 python3 -m quant_wechat_bot.recommendation_digest send --market A股 --top-n 3
+python3 -m quant_wechat_bot.recommendation_digest send --template weekly --market 全市场 --top-n 5 --months 6
 ```
 
 Behavior:
@@ -347,6 +351,33 @@ Behavior:
 - highlights the highest-priority entry candidates plus any immediate risk-off exits
 - includes budget and estimated shares when `trend_order_sizing` is configured
 - keeps dedupe state in `quant_wechat_bot/.cache/recommendation_digest_state.json`
+
+Scheduled templates:
+
+- `daily`: 推荐日报，适合工作日收盘后推送
+- `weekly`: 周复盘 + 下周候选池，适合周末推送
+
+Preview templates:
+
+```bash
+python3 -m quant_wechat_bot.recommendation_digest build --template daily --market A股 --top-n 3
+python3 -m quant_wechat_bot.recommendation_digest build --template weekly --market 全市场 --top-n 5 --months 6
+```
+
+Run the scheduler entrypoint:
+
+```bash
+python3 -m quant_wechat_bot.recommendation_digest run-schedule --dry-run
+/bin/zsh quant_wechat_bot/run_scheduled_reports.sh --dry-run
+```
+
+Recommended cron idea:
+
+- weekdays after A-share close: trigger `run-schedule`
+- weekends once: trigger `run-schedule`
+
+The scheduler decides which template is due by `recommendation_digest.daily_recommendation.weekdays`
+and `recommendation_digest.weekly_review.weekdays`, then reuses dedupe state to avoid double-sends.
 
 ## Why This Can Be A Good Public Repo
 

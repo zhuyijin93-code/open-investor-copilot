@@ -170,6 +170,7 @@ def help_text() -> str:
         20. 趋势回测 A股 12
         21. 交易计划 A股
         22. 推荐日报 全市场 3
+        23. 周复盘 全市场 5 6
 
         Slash commands:
         - /help
@@ -182,6 +183,7 @@ def help_text() -> str:
         - /backtest [market] [months]
         - /plan [market] [top_n]
         - /ideas [market] [top_n]
+        - /weekly [market] [top_n] [months]
 
         提醒:
         - `样本池` 是仓库自带的小样本
@@ -579,6 +581,18 @@ def render_recommendation_digest_text(market: str | None = None, top_n: int = 3)
     )
 
 
+def render_weekly_review_text(market: str | None = None, top_n: int = 5, months: int = 6) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return truncate_reply(
+        trend_strategy.format_weekly_review(
+            resolve_trend_universe_path(effective_market),
+            effective_market,
+            top_n=top_n,
+            lookback_months=months,
+        )
+    )
+
+
 def render_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
     return truncate_reply(
@@ -799,6 +813,11 @@ def build_recommendation_digest_text(market: str | None = None, top_n: int = 3) 
     return render_recommendation_digest_text(effective_market, top_n=top_n)
 
 
+def build_weekly_review_text(market: str | None = None, top_n: int = 5, months: int = 6) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return render_weekly_review_text(effective_market, top_n=top_n, months=months)
+
+
 def build_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
     cached = load_precomputed_reply("backtest", effective_market, top_n=top_n, months=months)
@@ -871,6 +890,12 @@ def dispatch_message(message: str) -> BotReply:
         top_n = int(ideas_match.group(2) or "3")
         return BotReply(build_recommendation_digest_text(ideas_match.group(1), top_n=top_n), "ideas")
 
+    weekly_match = re.match(r"^(?:/weekly|周复盘|周报|下周候选池)(?:\s+([^\s\d]+))?(?:\s+(\d+))?(?:\s+(\d+))?$", normalized, re.I)
+    if weekly_match:
+        top_n = int(weekly_match.group(2) or "5")
+        months = int(weekly_match.group(3) or "6")
+        return BotReply(build_weekly_review_text(weekly_match.group(1), top_n=top_n, months=months), "weekly")
+
     pick_match = re.match(r"^/(?:pick)\s+([^\s]+)(?:\s+([^\s\d]+))?(?:\s+(\d+))?$", normalized, re.I)
     if pick_match:
         top_n = int(pick_match.group(3) or "5")
@@ -903,7 +928,7 @@ def dispatch_message(message: str) -> BotReply:
         return BotReply(build_screen_text("defensive"), "pick")
 
     return BotReply(
-        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 推荐日报 全市场 3\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 交易计划 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
+        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 推荐日报 全市场 3\n- 周复盘 全市场 5 6\n- 选股 质量 全市场\n- 趋势选股 A股\n- 趋势回测 美股 12\n- 交易计划 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
         "help",
     )
 

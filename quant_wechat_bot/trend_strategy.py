@@ -2284,6 +2284,132 @@ def format_recommendation_digest_from_snapshot(snapshot: TrendSnapshot) -> str:
     return "\n".join(lines)
 
 
+def recent_curve_return(curve: tuple[DailyEquityPoint, ...], sessions: int = 5) -> float | None:
+    if len(curve) < 2:
+        return None
+    start_index = max(0, len(curve) - sessions - 1)
+    start_value = curve[start_index].net_value
+    end_value = curve[-1].net_value
+    if start_value <= 0:
+        return None
+    return end_value / start_value - 1.0
+
+
+def format_weekly_review_from_report(report: BacktestReport) -> str:
+    snapshot = report.latest_snapshot
+    risk_text = (
+        " / ".join(
+            f"{item.market_label} " + ("Risk ON" if item.risk_on else "Risk OFF")
+            for item in snapshot.regimes
+        )
+        if snapshot.regimes
+        else "未知"
+    )
+    weekly_return = recent_curve_return(report.daily_curve, sessions=5)
+    last_period = report.periods[-1] if report.periods else None
+    entry_actions = [
+        item
+        for item in snapshot.execution_plan
+        if item.action in {"首仓买入", "首仓加仓"}
+    ]
+    breakout_actions = {
+        item.ticker: item
+        for item in snapshot.execution_plan
+        if item.action == "突破加仓"
+    }
+    exit_actions = [item for item in snapshot.execution_plan if item.action.startswith("立即")]
+    picks_by_ticker = {item.ticker: item for item in snapshot.picks}
+
+    lines = [
+        f"【{report.market_label}周复盘 + 下周候选池｜{report.end_date.isoformat()}】",
+        f"市场风控: {risk_text}",
+        f"当前仓位: 持仓 {snapshot.invested_weight * 100:.0f}% | 现金 {snapshot.cash_weight * 100:.0f}%",
+    ]
+    recap_bits = [f"近阶段累计 {report.total_return * 100:+.1f}%", f"最大回撤 {report.max_drawdown * 100:.1f}%"]
+    if weekly_return is not None:
+        recap_bits.insert(0, f"最近5个交易日 {weekly_return * 100:+.1f}%")
+    lines.append("周度复盘: " + " | ".join(recap_bits))
+    if report.best_day is not None and report.worst_day is not None:
+        lines.append(
+            f"单日波动: 最好 {report.best_day.return_pct * 100:+.2f}% ({report.best_day.session_date.isoformat()})"
+            f" | 最差 {report.worst_day.return_pct * 100:+.2f}% ({report.worst_day.session_date.isoformat()})"
+        )
+    if last_period is not None:
+        regime_text = " / ".join(last_period.risk_on_markets) if last_period.risk_on_markets else "全部 Risk OFF"
+        lines.extend(
+            [
+                "",
+                "最近一期调仓",
+                f"- 区间 {last_period.start_date.isoformat()} -> {last_period.end_date.isoformat()} | 净收益 {last_period.portfolio_return * 100:+.2f}% | 换手 {last_period.turnover * 100:.0f}% | 风险开关 {regime_text}",
+            ]
+        )
+        if last_period.contributions:
+            best = last_period.contributions[0]
+            worst = last_period.contributions[-1]
+            lines.append(
+                f"- 归因: 最强 {best.ticker} {best.contribution * 100:+.2f}% | 最弱 {worst.ticker} {worst.contribution * 100:+.2f}%"
+            )
+        if last_period.exit_events:
+            exit_summary = " / ".join(f"{item.ticker} {item.reason}" for item in last_period.exit_events[:3])
+            lines.append(f"- 退出: {exit_summary}")
+    if entry_actions:
+        lines.extend(["", "下周候选池"])
+        for index, item in enumerate(entry_actions[:5], start=1):
+            pick = picks_by_ticker.get(item.ticker)
+            breakout = breakout_actions.get(item.ticker)
+            target_weight = pick.weight if pick is not None else (breakout.to_weight if breakout is not None else item.to_weight)
+            starter_weight = max(0.0, item.to_weight - item.from_weight)
+            header = f"{index}. {item.ticker} {item.name} | 目标 {target_weight * 100:.0f}%"
+            if pick is not None:
+                header += f" | 分数 {pick.score:.1f}"
+            lines.append(header)
+            detail_bits: list[str] = []
+            if pick is not None:
+                detail_bits.extend(
+                    [
+                        f"{pick.market_label}/{pick.sector}",
+                        f"现价 {pick.close:.2f}",
+                        f"20D {pick.ret20:+.1f}%",
+                        f"60D {pick.ret60:+.1f}%",
+                    ]
+                )
+            if item.stop_price is not None:
+                detail_bits.append(f"止损 {item.stop_price:.2f}")
+            if detail_bits:
+                lines.append("   " + " | ".join(detail_bits))
+            action_bits = [f"首仓 {starter_weight * 100:.0f}%"]
+            if breakout is not None and breakout.trigger_price is not None:
+                add_on_weight = max(0.0, breakout.to_weight - breakout.from_weight)
+                action_bits.append(f"突破 {breakout.trigger_price:.2f} 再加 {add_on_weight * 100:.0f}%")
+            sizing_text = execution_order_sizing_text(item)
+            if sizing_text:
+                action_bits.append(sizing_text)
+            lines.append("   " + " | ".join(action_bits))
+    elif snapshot.picks:
+        lines.extend(["", "下周核心跟踪"])
+        for index, item in enumerate(snapshot.picks[:5], start=1):
+            lines.append(
+                f"{index}. {item.ticker} {item.name} | 目标 {item.weight * 100:.0f}% | 分数 {item.score:.1f}"
+            )
+            lines.append(
+                f"   {item.market_label}/{item.sector} | 现价 {item.close:.2f} | 20D {item.ret20:+.1f}% | 60D {item.ret60:+.1f}%"
+            )
+    else:
+        lines.extend(["", "下周候选池仍为空，继续等市场风险偏好回暖。"])
+    if exit_actions:
+        lines.extend(["", "下周先处理"])
+        for item in exit_actions[:5]:
+            lines.append(f"- {item.action} {item.ticker} {item.name} | {item.note}")
+    sizing_summary = order_sizing_summary(snapshot.order_sizing_rules)
+    if sizing_summary:
+        lines.extend(["", f"资金模板: {sizing_summary}"])
+    else:
+        lines.extend(["", "提示: 还没配置资金桶，当前周报只输出权重，不输出预算金额和估算股数。"])
+    lines.append("")
+    lines.append("仅供模型跟踪参考，不构成投资建议。")
+    return "\n".join(lines)
+
+
 def format_trading_plan(
     universe_path: str | Path,
     market: str | None,
@@ -2304,6 +2430,24 @@ def format_recommendation_digest(
 ) -> str:
     snapshot = build_trend_snapshot(universe_path, market, top_n=top_n, history_fetcher=history_fetcher)
     return format_recommendation_digest_from_snapshot(snapshot)
+
+
+def format_weekly_review(
+    universe_path: str | Path,
+    market: str | None,
+    *,
+    lookback_months: int = 6,
+    top_n: int = DEFAULT_TOP_N,
+    history_fetcher: HistoryFetcher | None = None,
+) -> str:
+    report = backtest_trend_strategy(
+        universe_path,
+        market,
+        lookback_months=lookback_months,
+        top_n=top_n,
+        history_fetcher=history_fetcher,
+    )
+    return format_weekly_review_from_report(report)
 
 
 def export_trading_plan_csv(
