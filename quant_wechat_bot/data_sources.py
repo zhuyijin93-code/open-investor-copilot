@@ -13,7 +13,7 @@ EASTMONEY_FIELDS = "f12,f14,f2,f3,f5,f6,f20,f21,f9,f23,f8,f10,f15,f16,f17,f18,f6
 EASTMONEY_FS_A_SHARE = "m:1+t:2,m:0+t:6,m:0+t:80"
 EASTMONEY_FS_HK = "m:128+t:3,m:128+t:4,m:128+t:1,m:128+t:2"
 EASTMONEY_FS_US = "m:105,m:106,m:107"
-EASTMONEY_PAGE_SIZE = 5000
+EASTMONEY_PAGE_SIZE = 20000
 SINA_A_SHARE_URL = "https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData"
 CSV_FIELDS = [
     "ticker",
@@ -346,7 +346,12 @@ def _refresh_universe(
     output = Path(output_path)
     if output.exists() and time.time() - output.stat().st_mtime < max_age_seconds:
         return output
-    rows = fetcher(limit=limit, **min_amount)
+    try:
+        rows = fetcher(limit=limit, **min_amount)
+    except Exception:
+        if output.exists():
+            return output
+        raise
     return _write_universe_csv(output, rows)
 
 
@@ -424,29 +429,49 @@ def refresh_global_universe(
     if output.exists() and time.time() - output.stat().st_mtime < max_age_seconds:
         return output
 
-    a_path = refresh_a_share_universe(
-        a_share_path,
-        limit=a_share_limit,
-        min_amount_yuan=a_share_min_amount_yuan,
-        max_age_seconds=a_share_cache_seconds,
+    source_paths: list[Path] = []
+    errors: list[str] = []
+    refresh_jobs = (
+        (
+            "A股",
+            lambda: refresh_a_share_universe(
+                a_share_path,
+                limit=a_share_limit,
+                min_amount_yuan=a_share_min_amount_yuan,
+                max_age_seconds=a_share_cache_seconds,
+            ),
+        ),
+        (
+            "港股",
+            lambda: refresh_hk_share_universe(
+                hk_share_path,
+                limit=hk_share_limit,
+                min_amount_hkd=hk_share_min_amount_hkd,
+                max_age_seconds=hk_share_cache_seconds,
+            ),
+        ),
+        (
+            "美股",
+            lambda: refresh_us_share_universe(
+                us_share_path,
+                limit=us_share_limit,
+                min_amount_usd=us_share_min_amount_usd,
+                max_age_seconds=us_share_cache_seconds,
+            ),
+        ),
     )
-    hk_path = refresh_hk_share_universe(
-        hk_share_path,
-        limit=hk_share_limit,
-        min_amount_hkd=hk_share_min_amount_hkd,
-        max_age_seconds=hk_share_cache_seconds,
-    )
-    us_path = refresh_us_share_universe(
-        us_share_path,
-        limit=us_share_limit,
-        min_amount_usd=us_share_min_amount_usd,
-        max_age_seconds=us_share_cache_seconds,
-    )
+    for label, job in refresh_jobs:
+        try:
+            source_paths.append(Path(job()))
+        except Exception as exc:
+            errors.append(f"{label}: {exc}")
+    if not source_paths:
+        raise RuntimeError("No market universe could be refreshed. " + " | ".join(errors))
 
     merged: list[dict[str, str]] = []
     seen: set[str] = set()
-    for path in (a_path, hk_path, us_path):
-        for row in _load_csv_rows(Path(path)):
+    for path in source_paths:
+        for row in _load_csv_rows(path):
             ticker = str(row.get("ticker") or "").strip().upper()
             if not ticker or ticker in seen:
                 continue
