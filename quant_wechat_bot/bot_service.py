@@ -35,6 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 SNAPSHOT_ROOT = PROJECT_ROOT / "universe_snapshots"
 DEFAULT_SETTINGS_PATH = PROJECT_ROOT / ".cache" / "local_settings.json"
 TREND_CACHE_ROOT = PROJECT_ROOT / ".cache" / "trend_precomputed"
+TREND_CACHE_SCHEMA_VERSION = 2
 DEFAULT_TREND_PRECOMPUTE_MARKETS = ("全市场", "A股", "美股", "港股")
 DEFAULT_TREND_PRECOMPUTE_TOP_N = (2, 5)
 DEFAULT_TREND_PRECOMPUTE_MONTHS = (3, 6, 12)
@@ -461,6 +462,7 @@ def write_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
 def save_precomputed_reply(kind: str, market: str, text: str, *, top_n: int, months: int | None = None) -> Path:
     path = trend_cache_path(kind, market, top_n=top_n, months=months)
     payload = {
+        "schema_version": TREND_CACHE_SCHEMA_VERSION,
         "kind": kind,
         "market": display_market_label(market),
         "market_key": normalize_market(market),
@@ -487,6 +489,8 @@ def load_precomputed_reply(
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    if int(payload.get("schema_version") or 0) != TREND_CACHE_SCHEMA_VERSION:
         return None
     text = payload.get("reply")
     raw_generated_at = payload.get("generated_at")

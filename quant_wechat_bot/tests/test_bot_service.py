@@ -237,6 +237,29 @@ class BotServiceTests(unittest.TestCase):
         self.assertEqual(cached.text, "cached result")
         self.assertFalse(cached.stale)
 
+    def test_load_precomputed_reply_ignores_old_schema_version(self) -> None:
+        path = self.cache_root / "trend_all_top5.json"
+        path.write_text(
+            '{"schema_version": 1, "generated_at": "2026-06-26T00:00:00+00:00", "reply": "old"}',
+            encoding="utf-8",
+        )
+        with (
+            mock.patch("quant_wechat_bot.bot_service.TREND_CACHE_ROOT", self.cache_root),
+            mock.patch(
+                "quant_wechat_bot.bot_service.load_trend_precompute_config",
+                return_value=bot_service.TrendPrecomputeConfig(
+                    enabled=True,
+                    warm_on_startup=True,
+                    markets=("全市场",),
+                    top_n_values=(5,),
+                    backtest_months=(12,),
+                    max_age_minutes=1440,
+                ),
+            ),
+        ):
+            cached = bot_service.load_precomputed_reply("trend", "全市场", top_n=5)
+        self.assertIsNone(cached)
+
     def test_verify_wechat_signature(self) -> None:
         signature = bot_service.wechat_signature("token123", "1718000000", "nonce456")
         self.assertTrue(
