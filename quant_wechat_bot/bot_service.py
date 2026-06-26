@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import datetime as dt
 import hashlib
 import json
 import os
 import re
+import threading
 import textwrap
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -32,6 +34,11 @@ WECHAT_CALLBACK_PATH = "/wechat/callback"
 PROJECT_ROOT = Path(__file__).resolve().parent
 SNAPSHOT_ROOT = PROJECT_ROOT / "universe_snapshots"
 DEFAULT_SETTINGS_PATH = PROJECT_ROOT / ".cache" / "local_settings.json"
+TREND_CACHE_ROOT = PROJECT_ROOT / ".cache" / "trend_precomputed"
+DEFAULT_TREND_PRECOMPUTE_MARKETS = ("全市场", "A股", "美股", "港股")
+DEFAULT_TREND_PRECOMPUTE_TOP_N = (2, 5)
+DEFAULT_TREND_PRECOMPUTE_MONTHS = (3, 6, 12)
+DEFAULT_TREND_PRECOMPUTE_MAX_AGE_MINUTES = 24 * 60
 DEFAULT_WECHAT_MENU_ACTIONS = {
     "MENU_HELP": "帮助",
     "MENU_PICK_QUALITY": "选股 质量",
@@ -50,6 +57,28 @@ class BotReply:
 @dataclasses.dataclass
 class WeChatCallbackConfig:
     token: str
+
+
+@dataclasses.dataclass(frozen=True)
+class TrendPrecomputeConfig:
+    enabled: bool
+    warm_on_startup: bool
+    markets: tuple[str, ...]
+    top_n_values: tuple[int, ...]
+    backtest_months: tuple[int, ...]
+    max_age_minutes: int
+
+
+@dataclasses.dataclass(frozen=True)
+class CachedTrendReply:
+    text: str
+    generated_at: dt.datetime
+    stale: bool
+
+
+TREND_PRECOMPUTE_STATE_LOCK = threading.Lock()
+TREND_PRECOMPUTE_RUNNING = False
+TREND_PRECOMPUTE_LAST_ERROR: str | None = None
 
 
 def resolve_bind_host() -> str:
@@ -82,6 +111,27 @@ def parse_args() -> argparse.Namespace:
 
     chat_parser = subparsers.add_parser("chat", help="Run one chat turn from the terminal.")
     chat_parser.add_argument("message", help="User message to process.")
+
+    precompute_parser = subparsers.add_parser("precompute-trend", help="Build cached trend and backtest replies.")
+    precompute_parser.add_argument(
+        "--markets",
+        nargs="*",
+        help="Markets to precompute. Defaults to the configured trend_precompute.markets list.",
+    )
+    precompute_parser.add_argument(
+        "--top-n",
+        nargs="*",
+        type=int,
+        dest="top_n_values",
+        help="Trend top-N variants to precompute. Defaults to the configured trend_precompute.top_n_values list.",
+    )
+    precompute_parser.add_argument(
+        "--months",
+        nargs="*",
+        type=int,
+        dest="backtest_months",
+        help="Backtest month variants to precompute. Defaults to the configured trend_precompute.backtest_months list.",
+    )
 
     return parser.parse_args()
 
@@ -312,6 +362,272 @@ def resolve_default_market() -> str:
     return "sample"
 
 
+def display_market_label(value: str | None) -> str:
+    normalized = normalize_market(value)
+    mapping = {
+        "a": "A股",
+        "hk": "港股",
+        "us": "美股",
+        "all": "全市场",
+        "global": "全市场",
+    }
+    if normalized in mapping:
+        return mapping[normalized]
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "全市场"
+
+
+def parse_boolish(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return default
+
+
+def positive_int_tuple(values: object, default: tuple[int, ...]) -> tuple[int, ...]:
+    if not isinstance(values, list):
+        return default
+    parsed: list[int] = []
+    for item in values:
+        if isinstance(item, int) and item > 0 and item not in parsed:
+            parsed.append(item)
+    return tuple(parsed) or default
+
+
+def market_tuple(values: object, default: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(values, list):
+        return default
+    parsed: list[str] = []
+    for item in values:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        label = display_market_label(item)
+        if label not in parsed and normalize_market(label) in {"a", "hk", "us", "all"}:
+            parsed.append(label)
+    return tuple(parsed) or default
+
+
+def load_trend_precompute_config() -> TrendPrecomputeConfig:
+    settings = load_local_settings()
+    payload = settings.get("trend_precompute") if isinstance(settings, dict) else None
+    enabled = is_render_deployment()
+    warm_on_startup = enabled
+    markets = DEFAULT_TREND_PRECOMPUTE_MARKETS
+    top_n_values = DEFAULT_TREND_PRECOMPUTE_TOP_N
+    backtest_months = DEFAULT_TREND_PRECOMPUTE_MONTHS
+    max_age_minutes = DEFAULT_TREND_PRECOMPUTE_MAX_AGE_MINUTES
+    if isinstance(payload, dict):
+        enabled = parse_boolish(payload.get("enabled"), enabled)
+        warm_on_startup = parse_boolish(payload.get("warm_on_startup"), warm_on_startup)
+        markets = market_tuple(payload.get("markets"), markets)
+        top_n_values = positive_int_tuple(payload.get("top_n_values"), top_n_values)
+        backtest_months = positive_int_tuple(payload.get("backtest_months"), backtest_months)
+        raw_max_age = payload.get("max_age_minutes")
+        if isinstance(raw_max_age, int) and raw_max_age > 0:
+            max_age_minutes = raw_max_age
+    env_enabled = read_env_setting("QUANT_WECHAT_TREND_PRECOMPUTE")
+    if env_enabled is not None:
+        enabled = parse_boolish(env_enabled, enabled)
+    env_warm = read_env_setting("QUANT_WECHAT_TREND_WARM_ON_STARTUP")
+    if env_warm is not None:
+        warm_on_startup = parse_boolish(env_warm, warm_on_startup)
+    return TrendPrecomputeConfig(
+        enabled=enabled,
+        warm_on_startup=warm_on_startup,
+        markets=markets,
+        top_n_values=top_n_values,
+        backtest_months=backtest_months,
+        max_age_minutes=max_age_minutes,
+    )
+
+
+def trend_cache_path(kind: str, market: str, *, top_n: int, months: int | None = None) -> Path:
+    market_key = normalize_market(market)
+    if kind == "trend":
+        return TREND_CACHE_ROOT / f"trend_{market_key}_top{top_n}.json"
+    return TREND_CACHE_ROOT / f"backtest_{market_key}_m{months or 0}_top{top_n}.json"
+
+
+def write_json_atomic(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    return path
+
+
+def save_precomputed_reply(kind: str, market: str, text: str, *, top_n: int, months: int | None = None) -> Path:
+    path = trend_cache_path(kind, market, top_n=top_n, months=months)
+    payload = {
+        "kind": kind,
+        "market": display_market_label(market),
+        "market_key": normalize_market(market),
+        "top_n": top_n,
+        "months": months,
+        "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "reply": text,
+    }
+    return write_json_atomic(path, payload)
+
+
+def load_precomputed_reply(
+    kind: str,
+    market: str,
+    *,
+    top_n: int,
+    months: int | None = None,
+    allow_stale: bool = False,
+) -> CachedTrendReply | None:
+    config = load_trend_precompute_config()
+    path = trend_cache_path(kind, market, top_n=top_n, months=months)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    text = payload.get("reply")
+    raw_generated_at = payload.get("generated_at")
+    if not isinstance(text, str) or not text.strip() or not isinstance(raw_generated_at, str):
+        return None
+    try:
+        generated_at = dt.datetime.fromisoformat(raw_generated_at)
+    except ValueError:
+        return None
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=dt.timezone.utc)
+    age_seconds = max(
+        0.0,
+        (dt.datetime.now(dt.timezone.utc) - generated_at.astimezone(dt.timezone.utc)).total_seconds(),
+    )
+    stale = age_seconds > config.max_age_minutes * 60
+    if stale and not allow_stale:
+        return None
+    return CachedTrendReply(text=text, generated_at=generated_at, stale=stale)
+
+
+def format_stale_cache_notice(reply: CachedTrendReply) -> str:
+    generated_at = reply.generated_at.astimezone().strftime("%Y-%m-%d %H:%M")
+    return (
+        f"{reply.text}\n\n缓存说明:\n- 当前返回的是 {generated_at} 生成的缓存结果。\n"
+        "- 后台正在继续刷新最新趋势数据。"
+    )
+
+
+def render_trend_snapshot_text(market: str | None = None, top_n: int = 5) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return truncate_reply(
+        trend_strategy.format_trend_snapshot(
+            resolve_trend_universe_path(effective_market),
+            effective_market,
+            top_n=top_n,
+        )
+    )
+
+
+def render_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
+    effective_market = market if market is not None else resolve_default_market()
+    return truncate_reply(
+        trend_strategy.format_backtest_report(
+            resolve_trend_universe_path(effective_market),
+            effective_market,
+            lookback_months=months,
+            top_n=top_n,
+        )
+    )
+
+
+def should_precompute_request(kind: str, market: str, *, top_n: int, months: int | None = None) -> bool:
+    config = load_trend_precompute_config()
+    if not config.enabled:
+        return False
+    if display_market_label(market) not in config.markets:
+        return False
+    if top_n not in config.top_n_values:
+        return False
+    if kind == "backtest" and months not in config.backtest_months:
+        return False
+    return True
+
+
+def should_defer_to_precompute(kind: str, market: str, *, top_n: int, months: int | None = None) -> bool:
+    if not should_precompute_request(kind, market, top_n=top_n, months=months):
+        return False
+    if kind == "backtest":
+        return True
+    return normalize_market(market) == "all"
+
+
+def precompute_waiting_text(kind: str, market: str, *, top_n: int, months: int | None = None) -> str:
+    if kind == "trend":
+        return (
+            f"{display_market_label(market)} 趋势缓存正在预热，预计几十秒内完成。\n\n"
+            f"稍后重试 `趋势选股 {display_market_label(market)} {top_n}`，"
+            "或先看 `趋势选股 A股 2` / `趋势选股 美股 2`。"
+        )
+    return (
+        f"{display_market_label(market)} 趋势回测缓存正在预热，预计 1-2 分钟内完成。\n\n"
+        f"稍后重试 `趋势回测 {display_market_label(market)} {months or 12}`，"
+        "或先看 `趋势选股 全市场 5`。"
+    )
+
+
+def precompute_trend_outputs(
+    *,
+    markets: tuple[str, ...] | None = None,
+    top_n_values: tuple[int, ...] | None = None,
+    backtest_months: tuple[int, ...] | None = None,
+) -> tuple[list[Path], list[str]]:
+    config = load_trend_precompute_config()
+    selected_markets = markets or config.markets
+    selected_top_n = top_n_values or config.top_n_values
+    selected_backtest_months = backtest_months or config.backtest_months
+    generated: list[Path] = []
+    errors: list[str] = []
+    for market in selected_markets:
+        for top_n in selected_top_n:
+            try:
+                reply = render_trend_snapshot_text(market, top_n=top_n)
+                generated.append(save_precomputed_reply("trend", market, reply, top_n=top_n))
+            except Exception as exc:
+                errors.append(f"趋势选股 {market} {top_n}: {exc}")
+        for months in selected_backtest_months:
+            try:
+                reply = render_backtest_report_text(market, months=months)
+                generated.append(save_precomputed_reply("backtest", market, reply, top_n=5, months=months))
+            except Exception as exc:
+                errors.append(f"趋势回测 {market} {months}: {exc}")
+    return generated, errors
+
+
+def background_precompute_worker() -> None:
+    global TREND_PRECOMPUTE_LAST_ERROR, TREND_PRECOMPUTE_RUNNING
+    try:
+        _, errors = precompute_trend_outputs()
+        if errors:
+            TREND_PRECOMPUTE_LAST_ERROR = "; ".join(errors[:4])
+        else:
+            TREND_PRECOMPUTE_LAST_ERROR = None
+    finally:
+        with TREND_PRECOMPUTE_STATE_LOCK:
+            TREND_PRECOMPUTE_RUNNING = False
+
+
+def start_background_trend_precompute() -> None:
+    global TREND_PRECOMPUTE_RUNNING
+    config = load_trend_precompute_config()
+    if not config.enabled or not config.warm_on_startup:
+        return
+    with TREND_PRECOMPUTE_STATE_LOCK:
+        if TREND_PRECOMPUTE_RUNNING:
+            return
+        TREND_PRECOMPUTE_RUNNING = True
+    thread = threading.Thread(target=background_precompute_worker, name="trend-precompute", daemon=True)
+    thread.start()
+
+
 def build_strategy_list_text() -> str:
     return truncate_reply(
         quant_engine.format_strategy_catalog()
@@ -375,25 +691,38 @@ def resolve_trend_universe_path(market: str | None = None) -> Path:
 
 def build_trend_snapshot_text(market: str | None = None, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
-    return truncate_reply(
-        trend_strategy.format_trend_snapshot(
-            resolve_trend_universe_path(effective_market),
-            effective_market,
-            top_n=top_n,
-        )
-    )
+    cached = load_precomputed_reply("trend", effective_market, top_n=top_n)
+    if cached is not None:
+        return cached.text
+    stale = load_precomputed_reply("trend", effective_market, top_n=top_n, allow_stale=True)
+    if stale is not None and should_defer_to_precompute("trend", effective_market, top_n=top_n):
+        start_background_trend_precompute()
+        return format_stale_cache_notice(stale)
+    if should_defer_to_precompute("trend", effective_market, top_n=top_n):
+        start_background_trend_precompute()
+        return precompute_waiting_text("trend", effective_market, top_n=top_n)
+    reply = render_trend_snapshot_text(effective_market, top_n=top_n)
+    if should_precompute_request("trend", effective_market, top_n=top_n):
+        save_precomputed_reply("trend", effective_market, reply, top_n=top_n)
+    return reply
 
 
 def build_backtest_report_text(market: str | None = None, months: int = 12, top_n: int = 5) -> str:
     effective_market = market if market is not None else resolve_default_market()
-    return truncate_reply(
-        trend_strategy.format_backtest_report(
-            resolve_trend_universe_path(effective_market),
-            effective_market,
-            lookback_months=months,
-            top_n=top_n,
-        )
-    )
+    cached = load_precomputed_reply("backtest", effective_market, top_n=top_n, months=months)
+    if cached is not None:
+        return cached.text
+    stale = load_precomputed_reply("backtest", effective_market, top_n=top_n, months=months, allow_stale=True)
+    if stale is not None and should_defer_to_precompute("backtest", effective_market, top_n=top_n, months=months):
+        start_background_trend_precompute()
+        return format_stale_cache_notice(stale)
+    if should_defer_to_precompute("backtest", effective_market, top_n=top_n, months=months):
+        start_background_trend_precompute()
+        return precompute_waiting_text("backtest", effective_market, top_n=top_n, months=months)
+    reply = render_backtest_report_text(effective_market, months=months, top_n=top_n)
+    if should_precompute_request("backtest", effective_market, top_n=top_n, months=months):
+        save_precomputed_reply("backtest", effective_market, reply, top_n=top_n, months=months)
+    return reply
 
 
 def dispatch_message(message: str) -> BotReply:
@@ -1562,6 +1891,7 @@ class BotHTTPRequestHandler(BaseHTTPRequestHandler):
 
 
 def run_server(host: str, port: int) -> int:
+    start_background_trend_precompute()
     server = ThreadingHTTPServer((host, port), BotHTTPRequestHandler)
     print(f"Quant WeChat Bot listening on http://{host}:{port}")
     try:
@@ -1579,6 +1909,22 @@ def main() -> int:
         reply = handle_message(args.message)
         print(reply.text)
         return 0 if reply.command != "error" else 1
+    if args.command == "precompute-trend":
+        markets = tuple(args.markets) if args.markets else None
+        top_n_values = tuple(args.top_n_values) if args.top_n_values else None
+        backtest_months = tuple(args.backtest_months) if args.backtest_months else None
+        generated, errors = precompute_trend_outputs(
+            markets=markets,
+            top_n_values=top_n_values,
+            backtest_months=backtest_months,
+        )
+        for path in generated:
+            print(path)
+        if errors:
+            for error in errors:
+                print(f"ERROR: {error}")
+            return 1
+        return 0
     if args.command == "serve":
         return run_server(args.host, args.port)
     raise RuntimeError(f"Unsupported command: {args.command}")

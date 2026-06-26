@@ -31,6 +31,14 @@
     "trailing_stop_pct": 0.15,
     "trend_break_window": 20
   },
+  "trend_precompute": {
+    "enabled": true,
+    "warm_on_startup": true,
+    "markets": ["全市场", "A股", "美股", "港股"],
+    "top_n_values": [2, 5],
+    "backtest_months": [3, 6, 12],
+    "max_age_minutes": 1440
+  },
   "close_digest_watchlists": {
     "A股": ["600519.SS", "300750.SZ"],
     "HK": ["0700.HK", "9988.HK", "3690.HK"],

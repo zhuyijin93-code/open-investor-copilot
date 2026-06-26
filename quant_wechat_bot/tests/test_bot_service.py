@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import datetime as dt
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -49,6 +51,13 @@ class QuantEngineTests(unittest.TestCase):
 
 
 class BotServiceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.cache_root = Path(self.temp_dir.name)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
     def test_bind_defaults_to_localhost_without_cloud_port(self) -> None:
         with mock.patch.dict("os.environ", {}, clear=True):
             self.assertEqual(bot_service.resolve_bind_host(), "127.0.0.1")
@@ -177,6 +186,56 @@ class BotServiceTests(unittest.TestCase):
             path = bot_service.resolve_universe_path("全市场")
         self.assertEqual(path, PROJECT_ROOT / ".cache" / "global.csv")
         refresh.assert_called_once()
+
+    def test_build_trend_snapshot_uses_precomputed_cache(self) -> None:
+        cached = bot_service.CachedTrendReply(
+            text="cached trend output",
+            generated_at=dt.datetime.now(dt.timezone.utc),
+            stale=False,
+        )
+        with (
+            mock.patch("quant_wechat_bot.bot_service.load_precomputed_reply", return_value=cached),
+            mock.patch("quant_wechat_bot.bot_service.render_trend_snapshot_text") as render,
+        ):
+            reply = bot_service.build_trend_snapshot_text("A股", top_n=2)
+        self.assertEqual(reply, "cached trend output")
+        render.assert_not_called()
+
+    def test_build_backtest_uses_precompute_waiting_message_when_cache_is_missing(self) -> None:
+        with (
+            mock.patch("quant_wechat_bot.bot_service.load_precomputed_reply", side_effect=[None, None]),
+            mock.patch("quant_wechat_bot.bot_service.should_defer_to_precompute", return_value=True),
+            mock.patch("quant_wechat_bot.bot_service.start_background_trend_precompute") as warm,
+            mock.patch("quant_wechat_bot.bot_service.precompute_waiting_text", return_value="warming"),
+            mock.patch("quant_wechat_bot.bot_service.render_backtest_report_text") as render,
+        ):
+            reply = bot_service.build_backtest_report_text("全市场", months=12)
+        self.assertEqual(reply, "warming")
+        warm.assert_called_once()
+        render.assert_not_called()
+
+    def test_save_and_load_precomputed_reply_round_trip(self) -> None:
+        with (
+            mock.patch("quant_wechat_bot.bot_service.TREND_CACHE_ROOT", self.cache_root),
+            mock.patch(
+                "quant_wechat_bot.bot_service.load_trend_precompute_config",
+                return_value=bot_service.TrendPrecomputeConfig(
+                    enabled=True,
+                    warm_on_startup=True,
+                    markets=("全市场",),
+                    top_n_values=(5,),
+                    backtest_months=(12,),
+                    max_age_minutes=1440,
+                ),
+            ),
+        ):
+            path = bot_service.save_precomputed_reply("trend", "全市场", "cached result", top_n=5)
+            cached = bot_service.load_precomputed_reply("trend", "全市场", top_n=5)
+        self.assertEqual(path, self.cache_root / "trend_all_top5.json")
+        self.assertIsNotNone(cached)
+        assert cached is not None
+        self.assertEqual(cached.text, "cached result")
+        self.assertFalse(cached.stale)
 
     def test_verify_wechat_signature(self) -> None:
         signature = bot_service.wechat_signature("token123", "1718000000", "nonce456")
