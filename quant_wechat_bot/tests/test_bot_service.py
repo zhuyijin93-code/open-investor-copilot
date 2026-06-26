@@ -26,6 +26,27 @@ class QuantEngineTests(unittest.TestCase):
         self.assertIn("多策略评分", output)
         self.assertIn("质量动量", output)
 
+    def test_stock_report_accepts_hk_ticker_alias(self) -> None:
+        hk_row = {
+            "ticker": "00700.HK",
+            "name": "腾讯控股",
+            "sector": "软件服务",
+            "price": 380.0,
+            "market_cap_b": 3500.0,
+            "pe": 18.0,
+            "pb": 3.5,
+            "roe": 0.0,
+            "revenue_growth": 0.0,
+            "momentum_20d": 8.0,
+            "momentum_60d": 12.0,
+            "volatility_20d": 9.0,
+            "dividend_yield": 0.0,
+        }
+        with mock.patch("quant_wechat_bot.quant_engine.load_universe", return_value=[hk_row]):
+            output = quant_engine.format_stock_report("ignored.csv", "700.HK", "港股")
+        self.assertIn("00700.HK", output)
+        self.assertIn("腾讯控股", output)
+
 
 class BotServiceTests(unittest.TestCase):
     def test_bind_defaults_to_localhost_without_cloud_port(self) -> None:
@@ -88,9 +109,30 @@ class BotServiceTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {"QUANT_WECHAT_DEFAULT_MARKET": "A股"}, clear=True):
             self.assertEqual(bot_service.resolve_default_market(), "A股")
 
-    def test_render_deployment_defaults_to_a_share_market(self) -> None:
-        with mock.patch.dict("os.environ", {"RENDER_SERVICE_ID": "srv-test"}, clear=True):
-            self.assertEqual(bot_service.resolve_default_market(), "A股")
+    def test_render_deployment_defaults_to_global_market(self) -> None:
+        with (
+            mock.patch.dict("os.environ", {"RENDER_SERVICE_ID": "srv-test"}, clear=True),
+            mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
+        ):
+            self.assertEqual(bot_service.resolve_default_market(), "全市场")
+
+    def test_resolve_universe_path_supports_hk_market(self) -> None:
+        with (
+            mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
+            mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_hk_share_universe", return_value=PROJECT_ROOT / ".cache" / "hk.csv") as refresh,
+        ):
+            path = bot_service.resolve_universe_path("港股")
+        self.assertEqual(path, PROJECT_ROOT / ".cache" / "hk.csv")
+        refresh.assert_called_once()
+
+    def test_resolve_universe_path_supports_global_market(self) -> None:
+        with (
+            mock.patch("quant_wechat_bot.bot_service.load_local_settings", return_value={}),
+            mock.patch("quant_wechat_bot.bot_service.data_sources.refresh_global_universe", return_value=PROJECT_ROOT / ".cache" / "global.csv") as refresh,
+        ):
+            path = bot_service.resolve_universe_path("全市场")
+        self.assertEqual(path, PROJECT_ROOT / ".cache" / "global.csv")
+        refresh.assert_called_once()
 
     def test_verify_wechat_signature(self) -> None:
         signature = bot_service.wechat_signature("token123", "1718000000", "nonce456")

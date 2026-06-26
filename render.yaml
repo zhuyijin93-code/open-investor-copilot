@@ -8,6 +8,6 @@ services:
     healthCheckPath: /
     envVars:
       - key: QUANT_WECHAT_DEFAULT_MARKET
-        value: A股
+        value: 全市场
       - key: WECHAT_OFFICIAL_TOKEN
         sync: false

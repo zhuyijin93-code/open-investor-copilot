@@ -97,13 +97,17 @@ def help_text() -> str:
         5. 选股 价值
         6. 选股 低波
         7. 选股 质量 A股
-        8. 评分 NVDA
-        9. 评分 600519 A股
-        10. 股票池
-        11. 股票池 A股
-        12. 收盘总结 A股
-        13. 收盘总结 港股
-        14. 收盘总结 美股
+        8. 选股 质量 港股
+        9. 选股 质量 美股
+        10. 选股 质量 全市场
+        11. 评分 NVDA 美股
+        12. 评分 00700.HK 港股
+        13. 评分 600519 A股
+        14. 股票池
+        15. 股票池 全市场
+        16. 收盘总结 A股
+        17. 收盘总结 港股
+        18. 收盘总结 美股
 
         Slash commands:
         - /help
@@ -115,7 +119,7 @@ def help_text() -> str:
 
         提醒:
         - `样本池` 是仓库自带的小样本
-        - `A股` 默认拉取全量免费行情股票池
+        - `A股 / 港股 / 美股 / 全市场` 都支持免费行情股票池
         - 这不是投资建议
         """
     ).strip()
@@ -154,18 +158,22 @@ def is_render_deployment() -> bool:
     )
 
 
+def resolve_configured_path(settings: dict[str, Any], key: str, fallback_name: str) -> Path:
+    configured = settings.get(key) if isinstance(settings, dict) else None
+    if isinstance(configured, str) and configured.strip():
+        candidate = Path(configured.strip()).expanduser()
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / configured.strip()
+        return candidate
+    return PROJECT_ROOT / ".cache" / fallback_name
+
+
 def resolve_universe_path(market: str | None = None) -> Path:
     settings = load_local_settings()
     requested_market = market if market is not None else resolve_default_market()
     normalized_market = normalize_market(requested_market)
     if normalized_market == "a":
-        configured_a = settings.get("a_share_universe_csv") if isinstance(settings, dict) else None
-        if isinstance(configured_a, str) and configured_a.strip():
-            candidate = Path(configured_a.strip()).expanduser()
-            if not candidate.is_absolute():
-                candidate = PROJECT_ROOT / configured_a.strip()
-        else:
-            candidate = PROJECT_ROOT / ".cache" / "a_share_universe.csv"
+        candidate = resolve_configured_path(settings, "a_share_universe_csv", "a_share_universe.csv")
         limit = int(settings.get("a_share_limit", 0)) if isinstance(settings, dict) else 0
         min_amount_yuan = float(settings.get("a_share_min_amount_yuan", 0)) if isinstance(settings, dict) else 0.0
         max_age_seconds = int(settings.get("a_share_cache_seconds", 900)) if isinstance(settings, dict) else 900
@@ -174,6 +182,49 @@ def resolve_universe_path(market: str | None = None) -> Path:
             limit=limit,
             min_amount_yuan=min_amount_yuan,
             max_age_seconds=max_age_seconds,
+        )
+    if normalized_market == "hk":
+        candidate = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.csv")
+        limit = int(settings.get("hk_share_limit", 0)) if isinstance(settings, dict) else 0
+        min_amount_hkd = float(settings.get("hk_share_min_amount_hkd", 0)) if isinstance(settings, dict) else 0.0
+        max_age_seconds = int(settings.get("hk_share_cache_seconds", 1800)) if isinstance(settings, dict) else 1800
+        return data_sources.refresh_hk_share_universe(
+            candidate,
+            limit=limit,
+            min_amount_hkd=min_amount_hkd,
+            max_age_seconds=max_age_seconds,
+        )
+    if normalized_market == "us":
+        candidate = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.csv")
+        limit = int(settings.get("us_share_limit", 0)) if isinstance(settings, dict) else 0
+        min_amount_usd = float(settings.get("us_share_min_amount_usd", 0)) if isinstance(settings, dict) else 0.0
+        max_age_seconds = int(settings.get("us_share_cache_seconds", 1800)) if isinstance(settings, dict) else 1800
+        return data_sources.refresh_us_share_universe(
+            candidate,
+            limit=limit,
+            min_amount_usd=min_amount_usd,
+            max_age_seconds=max_age_seconds,
+        )
+    if normalized_market in {"all", "global"}:
+        candidate = resolve_configured_path(settings, "global_universe_csv", "global_universe.csv")
+        a_share_path = resolve_configured_path(settings, "a_share_universe_csv", "a_share_universe.csv")
+        hk_share_path = resolve_configured_path(settings, "hk_share_universe_csv", "hk_share_universe.csv")
+        us_share_path = resolve_configured_path(settings, "us_share_universe_csv", "us_share_universe.csv")
+        return data_sources.refresh_global_universe(
+            candidate,
+            a_share_path=a_share_path,
+            hk_share_path=hk_share_path,
+            us_share_path=us_share_path,
+            a_share_limit=int(settings.get("a_share_limit", 0)) if isinstance(settings, dict) else 0,
+            hk_share_limit=int(settings.get("hk_share_limit", 0)) if isinstance(settings, dict) else 0,
+            us_share_limit=int(settings.get("us_share_limit", 0)) if isinstance(settings, dict) else 0,
+            a_share_min_amount_yuan=float(settings.get("a_share_min_amount_yuan", 0)) if isinstance(settings, dict) else 0.0,
+            hk_share_min_amount_hkd=float(settings.get("hk_share_min_amount_hkd", 0)) if isinstance(settings, dict) else 0.0,
+            us_share_min_amount_usd=float(settings.get("us_share_min_amount_usd", 0)) if isinstance(settings, dict) else 0.0,
+            a_share_cache_seconds=int(settings.get("a_share_cache_seconds", 900)) if isinstance(settings, dict) else 900,
+            hk_share_cache_seconds=int(settings.get("hk_share_cache_seconds", 1800)) if isinstance(settings, dict) else 1800,
+            us_share_cache_seconds=int(settings.get("us_share_cache_seconds", 1800)) if isinstance(settings, dict) else 1800,
+            max_age_seconds=int(settings.get("global_cache_seconds", 1800)) if isinstance(settings, dict) else 1800,
         )
 
     configured = settings.get("universe_csv") if isinstance(settings, dict) else None
@@ -191,7 +242,13 @@ def normalize_market(value: str | None) -> str:
     normalized = value.strip().lower()
     if normalized in {"a", "a股", "ashare", "a-share", "cn", "china", "沪深", "中国"}:
         return "a"
-    if normalized in {"sample", "样本", "美股", "us", "usa"}:
+    if normalized in {"hk", "港股", "hongkong", "hong-kong"}:
+        return "hk"
+    if normalized in {"us", "usa", "美股", "美"}:
+        return "us"
+    if normalized in {"all", "global", "world", "全市场", "全部", "所有", "全球", "a+h+us", "ahus"}:
+        return "all"
+    if normalized in {"sample", "样本", "样本池"}:
         return "sample"
     return normalized
 
@@ -216,14 +273,14 @@ def resolve_default_market() -> str:
     if isinstance(value, str) and value.strip():
         return value.strip()
     if is_render_deployment():
-        return "A股"
+        return "全市场"
     return "sample"
 
 
 def build_strategy_list_text() -> str:
     return truncate_reply(
         quant_engine.format_strategy_catalog()
-        + "\n\n市场用法:\n- 选股 质量 A股\n- 评分 600519 A股\n- 股票池 A股"
+        + "\n\n市场用法:\n- 选股 质量 A股\n- 选股 质量 港股\n- 选股 质量 美股\n- 选股 质量 全市场\n- 评分 600519 A股\n- 评分 00700.HK 港股\n- 股票池 全市场"
     )
 
 
@@ -326,7 +383,7 @@ def dispatch_message(message: str) -> BotReply:
         return BotReply(build_screen_text("defensive"), "pick")
 
     return BotReply(
-        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 选股 质量 A股\n- 选股 动量 A股\n- 评分 600519 A股\n- 股票池 A股",
+        "我当前更擅长结构化的量化选股命令。\n\n试试:\n- 策略列表\n- 选股 质量 全市场\n- 选股 动量 A股\n- 评分 00700.HK 港股\n- 评分 NVDA 美股\n- 股票池 全市场",
         "help",
     )
 
@@ -339,9 +396,9 @@ def handle_message(message: str) -> BotReply:
         if "Unknown strategy" in str(exc):
             hint = "\n\n可用策略: 质量 / 动量 / 价值 / 低波"
         elif "Ticker" in str(exc):
-            hint = "\n\n提示: 先发送 `股票池` 或 `股票池 A股` 看当前股票池里有哪些代码。"
+            hint = "\n\n提示: 先发送 `股票池`、`股票池 港股`、`股票池 美股` 或 `股票池 全市场` 看当前股票池里有哪些代码。"
         elif "urlopen error" in str(exc).lower() or "timed out" in str(exc).lower() or "eastmoney" in str(exc).lower() or "sina" in str(exc).lower():
-            hint = "\n\n提示: A股全量股票池需要联网拉取免费行情快照。你也可以先试 `选股 质量 样本`。"
+            hint = "\n\n提示: 全量股票池需要联网拉取免费行情快照。你也可以先试 `选股 质量 样本`。"
         return BotReply(
             f"Request failed: {exc}{hint}\n\n试试 `帮助` 查看支持的命令。",
             "error",
@@ -1193,7 +1250,7 @@ def html_page() -> str:
         <div class="signal-grid">
           <div class="signal-card">
             <span class="signal-label">Markets</span>
-            <span class="signal-value">A股 / 港股 / 美股</span>
+            <span class="signal-value">A股 / 港股 / 美股 / 全市场</span>
           </div>
           <div class="signal-card">
             <span class="signal-label">Command Core</span>
@@ -1208,25 +1265,25 @@ def html_page() -> str:
         <div>
           <div class="eyebrow">Playbooks</div>
           <div class="prompt-grid">
-            <button class="prompt-card" data-prompt="选股 质量 A股">
+            <button class="prompt-card" data-prompt="选股 质量 全市场">
               <span class="prompt-kicker">Quality Bias</span>
               <span class="prompt-title">质量动量</span>
-              <span class="prompt-copy">先看 ROE、增长和没有走坏的趋势，适合找核心龙头。</span>
+              <span class="prompt-copy">先把 A/H/US 合在一起看质量和趋势，适合先扫全球强票。</span>
             </button>
             <button class="prompt-card" data-prompt="选股 动量 A股">
               <span class="prompt-kicker">Trend Focus</span>
               <span class="prompt-title">趋势增强</span>
               <span class="prompt-copy">把 20D / 60D 动量放在前面，适合先抓最强方向。</span>
             </button>
-            <button class="prompt-card" data-prompt="选股 价值 A股">
-              <span class="prompt-kicker">Value Screen</span>
-              <span class="prompt-title">低估价值</span>
-              <span class="prompt-copy">估值更低、股息更稳、利润还在线，偏防守型筛选。</span>
+            <button class="prompt-card" data-prompt="股票池 全市场">
+              <span class="prompt-kicker">Market Breadth</span>
+              <span class="prompt-title">全市场股票池</span>
+              <span class="prompt-copy">直接查看 A 股、港股、美股合并后的大池子，先确认覆盖面。</span>
             </button>
-            <button class="prompt-card" data-prompt="评分 NVDA">
+            <button class="prompt-card" data-prompt="评分 00700.HK 港股">
               <span class="prompt-kicker">Single Name</span>
               <span class="prompt-title">单票评分</span>
-              <span class="prompt-copy">直接拉一只股票做多策略打分，适合快速判断。</span>
+              <span class="prompt-copy">直接拉单票做多策略打分，A 股、港股、美股都能直接查。</span>
             </button>
           </div>
         </div>
@@ -1236,8 +1293,8 @@ def html_page() -> str:
           <div class="command-dock">
             <button class="dock-pill" data-prompt="帮助">帮助</button>
             <button class="dock-pill" data-prompt="策略列表">策略列表</button>
-            <button class="dock-pill" data-prompt="股票池 A股">股票池 A股</button>
-            <button class="dock-pill" data-prompt="评分 600519 A股">评分 600519</button>
+            <button class="dock-pill" data-prompt="股票池 全市场">股票池 全市场</button>
+            <button class="dock-pill" data-prompt="评分 00700.HK 港股">评分 00700.HK</button>
             <button class="dock-pill" data-prompt="收盘总结 A股">收盘总结 A股</button>
             <button class="dock-pill" data-prompt="收盘总结 美股">收盘总结 美股</button>
           </div>
@@ -1246,7 +1303,7 @@ def html_page() -> str:
         <div class="api-note">
           <strong>JSON endpoint</strong>
           <code>POST /api/chat</code><br>
-          <code>{"message":"选股 质量 A股"}</code>
+          <code>{"message":"选股 质量 全市场"}</code>
         </div>
       </section>
 
@@ -1267,7 +1324,7 @@ def html_page() -> str:
           </div>
           <div class="meta-card">
             <span class="meta-label">Fastest prompt</span>
-            <span class="meta-value">选股 质量 A股</span>
+            <span class="meta-value">选股 质量 全市场</span>
           </div>
           <div class="meta-card">
             <span class="meta-label">Delivery path</span>
@@ -1277,7 +1334,7 @@ def html_page() -> str:
 
         <div class="tape">
           <span class="tape-label">Prompt tape</span>
-          <div class="tape-marquee">帮助 · 策略列表 · 选股 质量 A股 · 选股 动量 A股 · 评分 NVDA · 股票池 A股 · 收盘总结 美股</div>
+          <div class="tape-marquee">帮助 · 策略列表 · 选股 质量 全市场 · 选股 动量 A股 · 评分 00700.HK 港股 · 股票池 全市场 · 收盘总结 美股</div>
         </div>
 
         <section class="desk">
@@ -1293,7 +1350,7 @@ def html_page() -> str:
 
           <form id="composer" class="composer">
             <div class="composer-shell">
-              <textarea id="message" placeholder="试试：选股 质量 A股 / 选股 动量 A股 / 评分 NVDA / 收盘总结 美股"></textarea>
+              <textarea id="message" placeholder="试试：选股 质量 全市场 / 股票池 全市场 / 评分 00700.HK 港股 / 评分 NVDA 美股"></textarea>
               <div class="composer-side">
                 <div class="composer-hint">`Enter` 发送，`Shift + Enter` 换行。</div>
                 <button id="send-button" class="composer-button" type="submit">Run Command</button>

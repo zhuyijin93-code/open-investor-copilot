@@ -118,6 +118,35 @@ def load_universe(path: str | Path) -> list[dict[str, object]]:
     return rows
 
 
+def normalize_lookup_ticker(value: str) -> str:
+    normalized = value.strip().upper()
+    if normalized.startswith(("SH", "SZ")) and normalized[2:].isdigit():
+        return normalized[2:]
+    if "." in normalized:
+        base, suffix = normalized.split(".", 1)
+        if suffix in {"SS", "SZ"} and base.isdigit():
+            return base
+        if suffix == "HK" and base.isdigit():
+            return f"{int(base):05d}.HK"
+    if normalized.isdigit():
+        if len(normalized) <= 5:
+            return f"{int(normalized):05d}.HK"
+        return normalized
+    return normalized
+
+
+def ticker_matches(row_ticker: str, requested_ticker: str) -> bool:
+    normalized_request = normalize_lookup_ticker(requested_ticker)
+    normalized_row = row_ticker.strip().upper()
+    if normalized_row == normalized_request:
+        return True
+    if normalized_row.isdigit() and normalized_request.isdigit():
+        return normalized_row == normalized_request
+    if normalized_row.endswith(".HK") and normalized_request.endswith(".HK"):
+        return normalized_row == normalized_request
+    return False
+
+
 def resolve_strategy(value: str | None) -> Strategy:
     if value is None or not value.strip():
         return STRATEGIES["quality"]
@@ -209,8 +238,16 @@ def screen_stocks(path: str | Path, strategy_value: str | None, top_n: int = 5) 
 
 
 def market_label(market: str | None) -> str:
-    if market and market.strip().lower() in {"a", "a股", "ashare", "a-share", "cn", "china", "沪深", "中国"}:
-        return "A股"
+    if market:
+        normalized = market.strip().lower()
+        if normalized in {"a", "a股", "ashare", "a-share", "cn", "china", "沪深", "中国"}:
+            return "A股"
+        if normalized in {"hk", "港股", "hongkong", "hong-kong"}:
+            return "港股"
+        if normalized in {"us", "usa", "美股"}:
+            return "美股"
+        if normalized in {"all", "global", "world", "全市场", "全部", "所有", "全球", "a+h+us", "ahus"}:
+            return "全市场"
     return "样本池"
 
 
@@ -232,15 +269,20 @@ def format_screen_output(path: str | Path, strategy_value: str | None, top_n: in
         lines.append(
             f"{index}. {row['ticker']} | {row['name']} | 总分 {row['score']:.1f}"
         )
-        market_cap_unit = "亿" if market_label(market) == "A股" else "B"
         lines.append(
-            f"   行业 {row['sector']} | 价格 {float(row['price']):.2f} | 市值 {float(row['market_cap_b']):.0f}{market_cap_unit}"
+            f"   行业 {row['sector']} | 价格 {float(row['price']):.2f} | 市值 {float(row['market_cap_b']):.0f}B"
         )
         lines.append(f"   亮点: {'; '.join(top_reason_lines(row))}")
     lines.append("")
-    example = "评分 600519 A股" if market_label(market) == "A股" else "评分 NVDA"
-    if market_label(market) == "A股":
-        lines.append("注: 免费 A股源当前使用东方财富/新浪行情快照，基本面因子待接入更完整财报源。")
+    label = market_label(market)
+    if label == "A股":
+        example = "评分 600519 A股"
+    elif label == "港股":
+        example = "评分 00700.HK 港股"
+    else:
+        example = "评分 NVDA 美股" if label == "美股" else "评分 NVDA"
+    if label in {"A股", "港股", "美股", "全市场"}:
+        lines.append("注: 免费行情池当前主要使用东方财富/新浪快照；基本面因子仍以轻量占位为主。")
     lines.append(f"发送 `{example}` 查看单票多策略评分。")
     return "\n".join(lines)
 
@@ -255,25 +297,23 @@ def format_strategy_catalog() -> str:
 
 
 def find_ticker(path: str | Path, ticker: str) -> dict[str, object]:
-    normalized = ticker.strip().upper()
     universe = load_universe(path)
     for row in universe:
-        if row["ticker"] == normalized:
+        if ticker_matches(str(row["ticker"]), ticker):
             return row
     raise RuntimeError(f"Ticker `{ticker}` not found in the current universe csv.")
 
 
 def format_stock_report(path: str | Path, ticker: str, market: str | None = None) -> str:
     universe = load_universe(path)
-    normalized = ticker.strip().upper()
-    matched = next((row for row in universe if row["ticker"] == normalized), None)
+    matched = next((row for row in universe if ticker_matches(str(row["ticker"]), ticker)), None)
     if matched is None:
         raise RuntimeError(f"Ticker `{ticker}` not found in the current universe csv.")
 
     strategy_rows = {}
     for strategy in STRATEGIES.values():
         scored = score_rows(universe, strategy)
-        strategy_rows[strategy.key] = next(row for row in scored if row["ticker"] == normalized)
+        strategy_rows[strategy.key] = next(row for row in scored if str(row["ticker"]) == str(matched["ticker"]))
 
     lines = [
         "Quant WeChat Bot",
@@ -318,6 +358,12 @@ def format_universe_overview(path: str | Path, market: str | None = None) -> str
     lines.append("")
     if market_label(market) == "A股":
         lines.append("数据源: 东方财富/新浪免费行情快照；默认仅过滤 ST/退市类股票。")
+    elif market_label(market) == "港股":
+        lines.append("数据源: 东方财富免费港股快照；已过滤 ETF / 牛熊证 / 权证等明显非股票品类。")
+    elif market_label(market) == "美股":
+        lines.append("数据源: 东方财富免费美股快照；已过滤 ETF / 基金 / 权证 / Units 等明显非股票品类。")
+    elif market_label(market) == "全市场":
+        lines.append("数据源: A股 + 港股 + 美股免费行情快照合并池。")
     else:
         lines.append("你可以把 `sample_universe.csv` 替换成自己的日频因子导出文件。")
     return "\n".join(lines)
